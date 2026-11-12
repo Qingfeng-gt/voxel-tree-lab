@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>动态树 · Web 复刻</title>
+<style>
+  :root {
+    --bg: #0b120d;
+    --panel: rgba(13, 22, 16, .74);
+    --panel-2: rgba(22, 35, 26, .55);
+    --line: rgba(233, 244, 230, .12);
+    --line-soft: rgba(233, 244, 230, .07);
+    --text: #eef5ea;
+    --muted: #9db3a3;
+    --accent: #9ce38a;
+    --accent-dim: rgba(156, 227, 138, .13);
+    --accent-line: rgba(156, 227, 138, .45);
+    --danger: #f0a48e;
+    --danger-line: rgba(240, 164, 142, .32);
+    --shadow: 0 28px 70px rgba(0, 0, 0, .48);
+    --radius: 22px;
+    --font: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+    --mono: "Cascadia Code", "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--text); font-family: var(--font);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { display: block; }
+
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none;
+    background:
+      radial-gradient(120% 90% at 50% 38%, transparent 42%, rgba(4, 9, 5, .38) 100%),
+      linear-gradient(180deg, rgba(4, 9, 5, .16), transparent 22%);
+  }
+
+  /* ---------- 标题 ---------- */
+  .brand {
+    position: fixed; top: 26px; left: 28px; pointer-events: none;
+    text-shadow: 0 2px 22px rgba(0, 0, 0, .45);
+  }
+  .mark {
+    display: flex; align-items: center; gap: 9px;
+    color: var(--accent); font-size: 10.5px; letter-spacing: .26em;
+    font-weight: 700; text-transform: uppercase; opacity: .95;
+  }
+  .mark svg { filter: drop-shadow(0 0 10px rgba(156, 227, 138, .35)); }
+  .brand h1 {
+    margin: 10px 0 2px; font-size: 30px; line-height: 1.05;
+    font-weight: 650; letter-spacing: .015em;
+  }
+  .brand h1 em {
+    font-style: normal; font-size: 13px; font-weight: 600;
+    letter-spacing: .16em; vertical-align: 9px;
+    color: var(--accent); opacity: .85;
+  }
+  .brand p {
+    margin: 6px 0 0; font-size: 12.5px; color: rgba(238, 245, 234, .66);
+    letter-spacing: .06em;
+  }
+
+  /* ---------- 面板 ---------- */
+  .panel {
+    position: fixed; top: 22px; right: 22px; width: 328px;
+    max-height: calc(100dvh - 44px); overflow: auto;
+    padding: 20px 20px 18px; border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: linear-gradient(158deg, rgba(20, 33, 24, .82), rgba(9, 15, 11, .74));
+    backdrop-filter: blur(22px) saturate(1.12);
+    -webkit-backdrop-filter: blur(22px) saturate(1.12);
+    box-shadow: var(--shadow);
+    scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.16) transparent;
+  }
+  .panel::-webkit-scrollbar { width: 8px; }
+  .panel::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,.14); border-radius: 99px;
+    border: 2px solid transparent; background-clip: padding-box;
+  }
+
+  .sec { margin-bottom: 18px; }
+  .sec:last-child { margin-bottom: 0; }
+  .sec-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin-bottom: 9px;
+  }
+  .sec-head h2 {
+    margin: 0; font-size: 10.5px; font-weight: 700;
+    letter-spacing: .2em; text-transform: uppercase; color: var(--muted);
+  }
+  .sec-head span { font-size: 10.5px; color: rgba(157, 179, 163, .6); font-family: var(--mono); }
+
+  /* ---------- 树种 ---------- */
+  .species-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .sp {
+    position: relative; display: flex; align-items: center; gap: 9px;
+    padding: 10px 11px; border-radius: 14px; cursor: pointer;
+    border: 1px solid var(--line-soft);
+    background: rgba(255, 255, 255, .035);
+    color: var(--text); font: inherit; text-align: left;
+    transition: background .18s, border-color .18s, transform .18s;
+  }
+  .sp:hover { background: rgba(255, 255, 255, .075); transform: translateY(-1px); }
+  .sp.active {
+    border-color: var(--accent-line);
+    background: var(--accent-dim);
+    box-shadow: inset 0 0 0 1px rgba(156, 227, 138, .08);
+  }
+  .sp .dot {
+    flex: 0 0 auto; width: 11px; height: 11px; border-radius: 50%;
+    background: currentColor; box-shadow: 0 0 14px currentColor;
+  }
+  .sp .n { display: block; font-size: 12.5px; font-weight: 650; line-height: 1.25; }
+  .sp .s { display: block; font-size: 9.5px; color: var(--muted); margin-top: 2px; letter-spacing: .02em; }
+
+  /* ---------- 按钮 ---------- */
+  .actions { display: flex; flex-direction: column; gap: 8px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .btn {
+    appearance: none; border: 1px solid var(--line);
+    background: rgba(255, 255, 255, .055); color: var(--text);
+    padding: 11px 12px; border-radius: 13px; font: inherit;
+    font-size: 12.5px; font-weight: 600; letter-spacing: .01em;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    gap: 8px; transition: background .18s, border-color .18s, transform .18s, filter .18s;
+  }
+  .btn:hover { background: rgba(255, 255, 255, .095); transform: translateY(-1px); }
+  .btn:active { transform: translateY(0) scale(.99); }
+  .btn.primary {
+    background: linear-gradient(180deg, #bdf2a6, #8ddc7c);
+    color: #12220f; border-color: transparent;
+    box-shadow: 0 10px 26px rgba(140, 220, 120, .24), inset 0 1px 0 rgba(255,255,255,.35);
+  }
+  .btn.primary:hover { filter: brightness(1.05); }
+  .btn.danger { color: var(--danger); border-color: var(--danger-line); }
+  .btn.danger:hover { background: rgba(240, 164, 142, .1); }
+  .btn.toggle.on {
+    color: var(--accent); border-color: var(--accent-line);
+    background: var(--accent-dim);
+  }
+  .btn.toggle .pill {
+    width: 26px; height: 14px; border-radius: 99px;
+    background: rgba(255,255,255,.12); position: relative; transition: background .2s;
+  }
+  .btn.toggle .pill::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 10px; height: 10px; border-radius: 50%;
+    background: rgba(255,255,255,.55); transition: left .2s, background .2s;
+  }
+  .btn.toggle.on .pill { background: rgba(156, 227, 138, .35); }
+  .btn.toggle.on .pill::after { left: 14px; background: var(--accent); }
+  .key {
+    font-family: var(--mono); font-size: 9.5px; padding: 2px 5px;
+    border-radius: 5px; background: rgba(0, 0, 0, .16);
+    color: inherit; opacity: .6;
+  }
+
+  /* ---------- 速度 ---------- */
+  .speed-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .speed-row label { font-size: 11.5px; color: var(--muted); }
+  .speed-row output { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 18px;
+    background: transparent; cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 3px; border-radius: 99px;
+    background: linear-gradient(90deg, rgba(156,227,138,.75), rgba(255,255,255,.12));
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5.5px;
+    border-radius: 50%; background: #cdf5ba; border: 2px solid #1a2a19;
+    box-shadow: 0 0 12px rgba(156, 227, 138, .55);
+  }
+  input[type="range"]::-moz-range-track {
+    height: 3px; border-radius: 99px; background: rgba(255,255,255,.16);
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: #cdf5ba; border: 2px solid #1a2a19;
+  }
+
+  /* ---------- 数据 ---------- */
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat {
+    padding: 10px 12px 9px; border-radius: 13px;
+    background: rgba(255, 255, 255, .035);
+    border: 1px solid var(--line-soft);
+  }
+  .stat .v {
+    font-family: var(--mono); font-size: 19px; font-weight: 600;
+    line-height: 1; letter-spacing: -.02em; color: #f2f8ee;
+  }
+  .stat .v small { font-size: 10px; color: var(--muted); font-weight: 400; margin-left: 3px; letter-spacing: 0; }
+  .stat .k {
+    margin-top: 6px; font-size: 9.5px; color: var(--muted);
+    letter-spacing: .14em; text-transform: uppercase;
+  }
+
+  /* ---------- 图例 ---------- */
+  .legend-bar {
+    display: flex; height: 7px; border-radius: 99px; overflow: hidden;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,.2);
+  }
+  .legend-bar span { flex: 1; }
+  .legend-labels {
+    display: flex; justify-content: space-between;
+    margin-top: 6px; font-size: 9.5px; color: var(--muted);
+    letter-spacing: .08em;
+  }
+  .note {
+    margin: 14px 0 0; font-size: 10.5px; line-height: 1.65;
+    color: rgba(157, 179, 163, .72);
+  }
+  .note code {
+    font-family: var(--mono); font-size: 9.5px;
+    color: rgba(205, 245, 186, .78);
+    background: rgba(255,255,255,.045); padding: 1px 4px; border-radius: 4px;
+  }
+
+  /* ---------- 底部提示 ---------- */
+  .hint {
+    position: fixed; left: 28px; bottom: 22px;
+    display: flex; gap: 18px; align-items: center;
+    font-size: 11.5px; color: rgba(238, 245, 234, .66);
+    text-shadow: 0 2px 14px rgba(0, 0, 0, .55);
+    pointer-events: none;
+  }
+  .hint b {
+    font-weight: 600; color: rgba(238,245,234,.9);
+    border-bottom: 1px solid rgba(238,245,234,.25); padding-bottom: 1px;
+  }
+
+  /* ---------- 提示条 ---------- */
+  .toast {
+    position: fixed; left: 50%; bottom: 30px;
+    transform: translate(-50%, 14px); opacity: 0; pointer-events: none;
+    padding: 10px 16px; border-radius: 12px;
+    background: rgba(10, 18, 12, .86); border: 1px solid var(--line);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    font-size: 12px; color: var(--text); white-space: nowrap;
+    box-shadow: 0 14px 40px rgba(0,0,0,.4);
+    transition: opacity .28s, transform .28s;
+    z-index: 5;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  .file-note {
+    position: fixed; left: 50%; top: 18px; transform: translateX(-50%);
+    z-index: 9; max-width: min(92vw, 720px);
+    padding: 12px 18px; border-radius: 12px;
+    background: rgba(38, 26, 16, .94); color: #ffe6b8;
+    border: 1px solid rgba(255, 196, 100, .35);
+    box-shadow: 0 14px 40px rgba(0, 0, 0, .45);
+    font-size: 12.5px; line-height: 1.6; text-align: center;
+  }
+  .file-note code {
+    font-family: var(--mono); color: #fff1cf;
+    background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 4px;
+  }
+
+  @media (max-width: 900px) {
+    .brand { top: 16px; left: 18px; }
+    .brand h1 { font-size: 23px; }
+    .brand p { display: none; }
+    .panel {
+      left: 12px; right: 12px; top: auto; bottom: 12px;
+      width: auto; max-height: 47dvh; border-radius: 20px; padding: 16px;
+    }
+    .hint { display: none; }
+    .toast { bottom: calc(47dvh + 24px); }
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.min.js",
+    "three/addons/": "./vendor/three/addons/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="stage"></div>
+<div id="vignette"></div>
+
+<header class="brand">
+  <div class="mark">
+    <svg width="24" height="24" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+      <path d="M16 29V12.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+      <path d="M16 16C10.8 16 7.5 12.7 7.5 8.4 12.7 8.4 16 11.7 16 16Z" fill="currentColor" opacity=".82"/>
+      <path d="M16 12.4c5.2 0 8.5-3.3 8.5-7.6-5.2 0-8.5 3.3-8.5 7.6Z" fill="currentColor" opacity=".48"/>
+    </svg>
+    <span>Dynamic Trees</span>
+  </div>
+  <h1>动态树 <em>WEB</em></h1>
+  <p>生长信号 · 水分树冠 · 砍伐倒下</p>
+</header>
+
+<aside class="panel" aria-label="控制面板">
+  <section class="sec">
+    <div class="sec-head"><h2>树种</h2><span>species</span></div>
+    <div class="species-grid" id="speciesGrid"></div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head"><h2>生长</h2><span>growth</span></div>
+    <div class="actions">
+      <button class="btn primary" id="growBtn">生长脉冲 <span class="key">G</span></button>
+      <div class="row">
+        <button class="btn" id="boneBtn">骨粉催熟 <span class="key">B</span></button>
+        <button class="btn toggle on" id="autoBtn"><span class="pill" aria-hidden="true"></span>自动生长</button>
+      </div>
+      <div class="row">
+        <button class="btn danger" id="chopBtn">砍倒 <span class="key">C</span></button>
+        <button class="btn" id="replantBtn">重新种树 <span class="key">R</span></button>
+      </div>
+      <button class="btn" id="viewBtn">重置视角</button>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="speed-row">
+      <label for="speed">生长速度</label>
+      <output id="speedOut" for="speed">2×</output>
+    </div>
+    <input type="range" id="speed" min="1" max="8" step="1" value="2" aria-label="生长速度">
+  </section>
+
+  <section class="sec">
+    <div class="sec-head"><h2>当前树</h2><span id="speciesLabel">oak</span></div>
+    <div class="stats">
+      <div class="stat"><div class="v" id="statHeight">0<small>格</small></div><div class="k">高度</div></div>
+      <div class="stat"><div class="v" id="statBranches">0</div><div class="k">枝节</div></div>
+      <div class="stat"><div class="v" id="statLeaves">0</div><div class="k">叶片</div></div>
+      <div class="stat"><div class="v" id="statPulses">0</div><div class="k">脉冲</div></div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head"><h2>叶片水分</h2><span>hydration</span></div>
+    <div class="legend-bar" id="legendBar"></div>
+    <div class="legend-labels"><span>边缘 · 稀疏</span><span>枝端 · 浓密</span></div>
+  </section>
+
+  <p class="note">
+    生长方向由六向概率图加权选择（<code>GrowthLogicKit</code>），
+    半径按相邻枝截面积守恒增长（<code>BranchBlock.growSignal</code>），
+    叶片按水分值向邻居扩散（<code>CellKit</code> / <code>CellSolver</code>）。
+    视觉与算法为本项目的独立实现。
+  </p>
+</aside>
+
+<div class="hint">
+  <span><b>拖拽</b> 旋转</span>
+  <span><b>滚轮</b> 缩放</span>
+  <span><b>点击树木</b> 在该处砍伐</span>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<div class="file-note" id="fileNote" hidden>
+  浏览器不允许通过 <code>file://</code> 加载本地 ES Module。请双击 <code>start.bat</code>，
+  然后用 <code>http://127.0.0.1:5173</code> 打开。
+</div>
+
+<script>
+  if (location.protocol === 'file:') {
+    const note = document.getElementById('fileNote');
+    if (note) note.hidden = false;
+  }
+</script>
+
+<script type="module" src="./src/app.js"></script>
+</body>
+</html>

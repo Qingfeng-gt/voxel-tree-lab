@@ -1,2 +1,4 @@
-# 贴图等二进制资源直接提交到仓库，不使用 Git LFS，
-# 这样克隆后无需执行 git lfs pull 即可直接运行。
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
+*.min.js binary

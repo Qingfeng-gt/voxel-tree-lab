@@ -1,186 +1,184 @@
 # Voxel Tree Lab
 
-面向**方块体素游戏**的程序化树木生长研究项目，用于探索树木形态、分枝规则与生长参数，为游戏内的树木生成提供参考。
+![预览](preview.png)
 
-本项目基于开源项目 [EZ-Tree](https://github.com/dgreenheck/ez-tree)（作者 Daniel Greenheck）二次开发，保留其骨架生成算法，并把树木、树叶与地形全部改为**体素方块渲染**。
+用浏览器复刻 **Dynamic Trees** 的核心生长逻辑：程序化生长、六向概率分枝、半径守恒、叶片水分扩散、点击砍伐与整树倒下。
 
-- 中文界面
-- 体素渲染：树干、树枝、树叶与岛屿地形均由方块组成，默认树木高度约 4~10 个方块（视预设而定），按玩家 1×2×1 的比例接近方块游戏中的树木
-- 五个生长阶段：树苗 → 幼树 → 小树 → 成树 → 成熟，可逐阶段预览，每个阶段都是完整的小树
-- 树干、树枝、细枝使用不同尺寸的方块并相互重叠，枝干连接处没有空隙；树叶使用多面体叶团模型，随机旋转缩放后交叠成自然的树冠
-- 小型体素岛屿地形：可调岛屿半径、地形起伏、随机种子与水面
-- 方块外观可定义：颜色、自定义贴图、自定义 GLB 模型、JSON 配置导入导出
-- 数十个可实时调节的树木参数（分枝层级、角度、弯曲度、锥度、叶片密度等）
-- 导出 GLB 模型、PNG 截图、方块数据 JSON 与预设 JSON
+渲染采用 **Minecraft 方块风格**：
 
-> 本项目是独立的研究/演示项目，与 EZ-Tree 原作者无隶属关系。原始项目的名称、版权与许可声明见下文「开源引用与致谢」。
+- 树枝按 `radius` 缩放成方块柱，相邻方块之间自动补连接段；
+- 树叶是整块 1×1 立方体，使用程序生成的 16×16 像素贴图；
+- 树皮、年轮、草方块、根土、云、粒子和鼠标选框全部方块化。
 
-## 快速开始
+所有树木逻辑、渲染组织、方块贴图和交互都在本仓库中实现。渲染底层使用 MIT 协议的 **Three.js 0.167.1**（已放在 `vendor/`，离线可用）。
 
-```bash
-npm install
-npm run dev
-```
+## 运行
 
-开发模式直接使用 `src/lib` 中的库源码，修改后会热更新。
+**推荐：双击 `start.bat`**
 
-如需以生产方式构建演示应用（先构建库，再构建应用）：
+会自动启动本地服务器并打开浏览器；5173 被占用时会自动改用 5174、5175……出错时窗口会停住并显示原因。
+
+也可以手动运行：
 
 ```bash
-npm run app
+node serve.mjs
 ```
 
-构建产物输出到 `dist/`。也可以使用 Docker：
+然后打开 <http://127.0.0.1:5173>。
 
-```bash
-docker compose up -d
+> 浏览器不允许 `file://` 页面加载本地 ES Module，所以不要直接双击 `index.html`；请用 `start.bat` 或 `serve.mjs` 以 HTTP 方式访问。
+
+需要支持 WebGL2 的现代浏览器（Chrome / Edge / Firefox / Safari）。
+
+## 操作
+
+| 操作 | 说明 |
+|---|---|
+| 拖拽 / 滚轮 | 旋转、缩放 |
+| 悬停树体 | 显示 Minecraft 风格的方块黑框 |
+| 点击树体 | 在该枝处砍伐，砍下的部分旋转倒下 |
+| `G` / 生长脉冲 | 执行一次根土方块的生长脉冲 |
+| `B` / 骨粉催熟 | 连续执行 14 次生长 |
+| 自动生长 | 按“生长速度”滑杆持续生长 |
+| `C` / 砍倒 | 从低处主干砍断整棵树 |
+| `R` / 重新种树 | 重播当前树种 |
+| 树种按钮 | 切换树种并重新种一棵 |
+
+## 源码结构
+
+```text
+index.html          HTML / CSS / UI 外壳 + import map
+src/
+  app.js            应用状态、UI、输入、相机取景、主循环
+  core.js           动态树逻辑（纯 JS，不依赖 Three.js）
+  color.js          叶片水分值 → 实例颜色
+  world.js          场景、相机、光照、像素贴图、地面、根土、云
+  treeView.js       方块树枝/树叶实例化、悬停选框、砍口截面
+  effects.js        方块粒子、砍倒动画
+vendor/three/
+  three.module.min.js
+  addons/controls/OrbitControls.js
+  LICENSE
+serve.mjs           本地静态服务器（自动开浏览器、端口回退）
+start.bat           Windows 启动脚本
 ```
 
-## 体素与阶段模型
+### 模块职责
 
-### 树木如何变成方块
+- **`core.js`**：完全不依赖渲染库，可以直接在 Node 中运行和测试。包含常量、六向概率图、`GrowSignal` 递归、半径回溯、叶片扩散、砍伐数据。
+- **`world.js`**：只负责环境和资源：WebGL 渲染器、相机、OrbitControls、光照、天空、像素贴图工厂、草地、根土、方块云。
+- **`treeView.js`**：把 `Tree` 的数据写进 `InstancedMesh`——每个枝节是一个按半径缩放的方块，边是连接方块；每个叶节点是一个完整方块。还负责物种贴图缓存、悬停黑框和砍口截面。
+- **`effects.js`**：方块粒子、骨粉粒子、砍倒后的独立旋转组、落地扬尘与落叶；不关心 UI。
+- **`app.js`**：把以上模块接起来，处理 UI 状态、键盘/鼠标、自动生长、相机自动取景和主循环。
 
-1. 使用 EZ-Tree 生成树枝骨架（每段树枝的位置、方向和半径），并记录每段分枝的层级。
-2. 按「树木缩放」把骨架整体缩放。默认缩放下，白蜡树（中）约 9 个方块高、树干 1 格宽，接近方块游戏中常见树木的比例；可在 0.04~0.3 之间调整。
-3. 不同部位使用不同尺寸与外观的方块：
-   - **树干**：完整 1×1×1 方块；
-   - **树枝**：0.8 格方块，重叠排列；
-   - **细枝**：0.6 格方块，与相邻方块重叠，连接处没有缝隙；
-   - **树叶**：使用多面体叶团模型（而非立方体），略大于一个方块并随机旋转/缩放，彼此交叠形成连续、自然的树冠。
-4. 树干按圆柱范围填充；半径较小的树枝/细枝沿线段逐格排列，方块尺寸大于网格间距，保证枝干连续无断口。
-5. 成熟阶段的树叶来自叶片骨架位置并在球形范围内随机补齐，最后用椭球裁剪四角，得到圆润的树冠轮廓。
+## 动态树逻辑
 
-### 五个生长阶段
+### 1. 数据结构
 
-| 阶段 | 名称 | 组成 |
-| --- | --- | --- |
-| 0 | 树苗 | 2~3 格树干 + 顶部小叶簇 |
-| 1 | 幼树 | 短树干 + 第一层树枝 + 枝头叶簇 |
-| 2 | 小树 | 更高的树干 + 更多一级树枝 + 叶簇 |
-| 3 | 成树 | 完整树干 + 一级/二级树枝 + 枝头叶簇 |
-| 4 | 成熟 | 完整树干 + 全部树枝/细枝 + 完整树冠 |
+整棵树由两个稀疏表组成：
 
-每个阶段都是**重新构建的一棵完整小树**，而不是把成熟树切掉一半，因此任何阶段看起来都像一棵树。界面左上角或「体素与生长」面板可以逐阶段预览，也可以用 URL 参数直接打开某一阶段：
-
-```
-http://localhost:5173/?stage=3
+```js
+nodes:  Map<"x,y,z", { x, y, z, radius, parent, children }>
+leaves: Map<"x,y,z", { x, y, z, hydro, owner }>
 ```
 
-### 可调参数
+- `nodes` 中的每个格子是一段树枝，`radius` 为 1..8（17+ 用于粗树干）；
+- `leaves` 中的每个格子是一片叶子，`hydro` 为 1..7，`owner` 指向最近的枝节；
+- 根土方块在 `y=0`，树干从 `(0,1,0)` 开始。
 
-「体素与生长」中可以调整树木缩放、方块尺寸、树叶密度和树冠起始高度；「方块定义」中可以修改每种方块的颜色、贴图、GLB 模型，或导入导出 JSON 配置。
+### 2. 生长脉冲
 
-### 方块定义
-
-所有方块类型在 `src/app/blocks.js` 中注册（树干、树枝、细枝、树叶、草、泥土、石头、沙子、水）。每种方块支持：
-
-- **颜色**：界面中直接调整（会与程序化像素纹理相乘）。
-- **自定义贴图**：在「方块定义」中选择方块类型后导入图片。
-- **自定义 GLB 模型**：模型会被自动居中并缩放为 1×1×1 的方块。
-- **JSON 配置**：导出/导入所有方块的颜色与自定义贴图（贴图以 data URL 保存）。
-
-一棵树默认只使用**树干 / 树枝 / 细枝 / 树叶**四种内置方块，不需要任何自定义模型；地形使用草、泥土、石头、沙子和水。
-
-### 导出
-
-- **GLB**：将当前阶段的体素树合并为普通网格导出，便于导入游戏引擎。
-- **方块数据 JSON**：每个方块的坐标、尺寸、类型与当前阶段，便于做数据分析或在自己的体素引擎中重建。
-- **PNG**：导出当前视角的透明背景截图。
-
-## 开源引用与致谢
-
-本项目的核心能力来自以下开源项目与资源：
-
-| 项目 / 资源 | 版本 | 许可证 | 用途 |
-| --- | --- | --- | --- |
-| [EZ-Tree](https://github.com/dgreenheck/ez-tree)（`@dgreenheck/ez-tree`） | 1.1.0 | MIT | 程序化树木生成核心算法（`src/lib/` 即其源码） |
-| [Three.js](https://threejs.org/) | ^0.167 | MIT | 3D 渲染引擎 |
-| [GLTFExporter](https://threejs.org/docs/#examples/en/exporters/GLTFExporter) | 随 Three.js | MIT | 导出 GLB 模型 |
-| [fflate](https://github.com/101arrowz/fflate) | 随 Three.js addons | MIT | 随 Three.js 提供的工具库（当前应用未直接使用） |
-| [Heroicons](https://heroicons.com/) | 轮廓图标 | MIT | 界面 SVG 图标 |
-| [Font Awesome Free](https://fontawesome.com/) | 6.0.0-beta3（CDN） | 图标 CC BY 4.0 / 字体 SIL OFL 1.1 / 代码 MIT | About 弹窗社交图标 |
-| [Space Grotesk](https://fonts.google.com/specimen/Space+Grotesk)（Google Fonts） | — | SIL OFL 1.1 | 界面字体 |
-| [ambientCG](https://ambientcg.com/) 树皮贴图 | 1K JPG | CC0 1.0 | 树皮材质（见 `src/app/public/textures/LICENSE.md`） |
-
-开发工具：[Vite](https://vitejs.dev/)（MIT）、[Prettier](https://prettier.io/)（MIT）。
-
-上游 EZ-Tree 仓库附带的演示资源（树叶贴图、低模 GLB、环境音效、字体等）随仓库一并保留；其中树叶贴图按上游说明随项目 MIT 许可提供，其余第三方资源的授权请以其原始来源为准。如需商用，请自行核实每项资源的许可。
-
-完整的第三方声明见 [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)。
-
-## 相对上游的改动
-
-- 界面文案全面中文化
-- 新增体素渲染层：树木、树叶与地形全部由方块组成（`blocks.js` / `voxelTree.js` / `voxelTerrain.js`）
-- 新增五个生长阶段预览：每个阶段都是一棵完整的小树，支持逐阶段切换与 `?stage=N` 链接直达
-- 新增小型体素岛屿地形与方块定义系统（颜色 / 贴图 / GLB / JSON）
-- 移除平滑网格的 LOD 预览与 LOD 导出，改为体素方块数据与体素 GLB 导出
-- 移除上游的 Google Analytics 统计与自定义域名配置
-- 移除上游的 npm 发布工作流，保留 GitHub Pages 部署工作流
-- 贴图资源改为直接提交（不使用 Git LFS），克隆后无需 `git lfs pull`
-- 包名 / 版本 / 仓库地址改为本项目信息
-
-## 树木参数说明
-
-### 通用
-
-- `seed`：随机种子，相同种子生成相同树木
-- `type`：树木类型（`TreeType.Deciduous` 落叶树 / `TreeType.Evergreen` 常绿树）
-
-### 树皮 `bark`
-
-- `type`：树皮贴图类型（`BarkType`）
-- `tint`：颜色色调（十六进制）
-- `flatShading` / `textured`：平面着色 / 是否使用贴图
-- `textureScale`：贴图在 X、Y 方向的缩放
-
-### 树枝 `branch`
-
-- `levels`：递归分枝层级数（0 表示只有树干）
-- `angle`：各层级相对父枝的生长角度（度）
-- `children`：各层级的子枝数量
-- `force`：外部生长力，含 `direction` 与 `strength`
-- `gnarliness`：各层级的弯曲/扭曲程度
-- `length` / `radius`：各层级枝条长度 / 半径
-- `sections`：沿枝条长度的分段数
-- `segments`：枝条横截面的圆周细分
-- `start`：子枝在父枝上的起始位置（0~1）
-- `taper`：各层级的锥度（0~1）
-- `twist`：各层级的扭转程度
-
-### 树叶 `leaves`
-
-- `type`：叶片贴图类型（`LeafType`）
-- `billboard`：`Single` / `Double`，单面或十字交叉双面叶片
-- `angle` / `count` / `start`：叶片角度、数量、起始位置
-- `size` / `sizeVariance`：叶片大小与大小随机差异
-- `tint`：叶片色调
-- `alphaTest`：叶片透明度裁剪阈值
-
-### LOD
-
-本项目使用体素渲染，不使用 EZ-Tree 的平滑网格 LOD。`src/lib/tree.js` 仍保留 `generateLODs()` / `createGeometry()` 接口，方便在上游库或自定义渲染器中使用。
-
-## 目录结构
-
-```
-src/lib/          树木骨架生成库（来自 EZ-Tree，MIT）
-src/app/blocks.js       方块类型注册表、材质、贴图/模型/JSON 配置
-src/app/voxelTree.js    树枝骨架 → 分阶段体素树（树干/树枝/细枝/树叶）
-src/app/voxelTerrain.js 体素岛屿地形
-src/app/ui.js           Three.js 演示应用与中文界面
-src/app/public/         贴图、模型、字体、音效等静态资源
+```text
+Tree.growPulse()
+  └─ 按 growthRate 决定执行几次 sendSignal()
+       └─ new GrowSignal(energy = signalEnergy)
+            └─ Tree.growSignal(baseKey, signal)
 ```
 
-## 许可证
+一次信号是一条从根向外的递归路径：
 
-本项目沿用上游的 [MIT License](./LICENSE)。原始版权声明：
+1. `step()` 消耗 1 点能量，能量耗尽即停止；
+2. 在当前位置用 **六向概率图** 选择下一方向；
+3. 目标若是空气：粗枝放置新细枝和叶团，细枝只长单片叶；
+4. 目标若是树叶：树叶转成一级细枝（`growIntoLeaf`）；
+5. 目标若是已有树枝：递归进入该枝；
+6. 回溯时按体积守恒更新半径：
 
-> Copyright (c) 2024 Daniel Greenheck
+```text
+r = sqrt(Σ 相邻枝 r²) + tapering
+```
 
-根据 MIT 许可，分发本项目的副本时须保留上述版权声明与许可声明。
+7. 树干内允许长到 `maxRadius`，树干外最多 8；空间不足时 `choked`。
 
-## 相关链接
+### 3. 六向概率图
 
-- 上游项目：https://github.com/dgreenheck/ez-tree
-- 上游在线演示：https://eztree.dev
+```text
+prob[UP]            = upProbability
+prob[当前方向]      += 1
+prob[邻居方向]      += 邻居是树枝 ? radius + 2 : 邻居是树叶 ? leafWeight : 0
+```
+
+低于 `lowestBranchHeight` 时强制向上；云杉（`conifer`）、金合欢（`acacia`）、丛林（`jungle`）有各自的概率修正。
+
+### 4. 叶片水分
+
+- 新叶从相邻树枝/树叶读取水分；
+- 每个脉冲以一定概率向邻居扩散，水分 `hydro - 1`，最低为 1；
+- 叶片颜色由 `hydro` 决定，边缘偏黄、稀疏，枝端更深更密；
+- 叶团模板（`cluster`）决定不同树种的冠形。
+
+### 5. 砍伐与倒下
+
+`Tree.chopAt(key)` 收集该节点和全部后代，连同 `owner` 属于这些节点的叶子，生成独立数据；`effects.js` 用这些数据建立独立的 `InstancedMesh` 组，绕砍口旋转、碰撞落地、喷粒子，最后淡出。
+
+## 树种参数
+
+`src/core.js` 的 `SPECIES_LIST` 中每个树种可调：
+
+```js
+{
+  tapering,      // 收细系数
+  energy,        // 生长信号能量（决定单次信号能走多远）
+  up,            // 向上概率
+  lowest,        // 低于该步数时强制向上
+  growthRate,    // 每个脉冲执行信号的期望次数
+  maxRadius,     // 最大枝半径
+  primary,       // 一级细枝半径
+  secondary,     // 二级枝半径
+  logic,         // 'default' | 'conifer' | 'acacia' | 'jungle'
+  leafWeight,    // 树叶对方向概率的贡献
+  leafSize,      // 树叶方块渲染尺寸
+  cluster,       // 叶团椭球半径与形状
+  bark, leaf     // 颜色
+}
+```
+
+## 渲染细节
+
+- **树枝**：方块核心尺寸为 `clamp(radius / 8, 0.125, 1.75)` 格；每个父/子节点之间画一个沿轴向的方块连接段，横截面取两端较小值。
+- **树叶**：1×1×1 方块，实例颜色由水分决定，贴图为灰度像素图乘色；少量透明像素让枝条从叶隙露出。
+- **贴图**：全部由 Canvas 2D 生成——树皮竖纹、白桦横斑、年轮、叶子、草方块、根土；使用 `NearestFilter`，没有使用 Minecraft 原版素材。
+- **光照与阴影**：半球光 + 平行光 + PCFSoft 阴影。
+- **悬停**：对实例网格做射线检测，把黑色线框放到对应方块格中心。
+- **倒下**：被砍下的方块组使用独立的材质克隆，绕砍口旋转，落地后淡出并清理。
+
+## 依赖与许可
+
+- `vendor/three/`：Three.js 0.167.1 + OrbitControls，MIT License，许可证见 `vendor/three/LICENSE`。
+- 其余代码、贴图、UI 均为本仓库实现。
+- 动态树算法参考 Dynamic Trees 的设计思路，但没有复制其代码或美术资源。
+
+## 已知简化
+
+- 世界生成没有实现 Dynamic Trees 的 `JoCode` 预烘焙树形；本项目从一棵种子树实时生长。
+- 叶片水分使用“叶团模板 + 邻接扩散”近似，而不是 mod 的 `CellSolver` 位运算。
+- 倒下动画是定轴旋转，没有逐方块碰撞和实体伤害。
+- 没有季节、病害、根系、果实、藤蔓、巨型树种等扩展系统。
+- 每次重新种树外观都由 `Math.random` 决定。
+
+## 可以继续扩展
+
+1. 实现 JoCode 的编码/导出，把长好的树编码成方向串；
+2. 用真正的 `CellSolver` 替换叶团扩散；
+3. 按半径分档生成“核心 + 套管 + 年轮面”的方块模型；
+4. 加入泊松圆盘森林、地形和存档导出。
