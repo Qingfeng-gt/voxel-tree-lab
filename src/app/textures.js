@@ -53,7 +53,7 @@ export function getBarkMaps(type) {
   if (barkCache.has(type)) return barkCache.get(type);
 
   const dir = `${type}_1K-JPG`;
-  const base = `/textures/bark/${dir}/${dir}`;
+  const base = `textures/bark/${dir}/${dir}`;
   const maps = {};
   const drop = (key) => () => {
     console.warn(`Missing bark texture: ${base}_… (${key}); skipping this map.`);
@@ -73,7 +73,7 @@ export function getBarkMaps(type) {
  */
 export function getLeafMap(type) {
   if (leafCache.has(type)) return leafCache.get(type);
-  const texture = loadColor(`/textures/leaves/${type}.png`, () => {
+  const texture = loadColor(`textures/leaves/${type}.png`, () => {
     console.warn(`Missing leaf texture: /textures/leaves/${type}.png; skipping.`);
     leafCache.set(type, null);
   });
