@@ -107,15 +107,18 @@ function chopAtKey(key) {
   if (!result || !result.nodes.length) return;
 
   outline.visible = false;
-  tree.dead = true;
-  state.auto = false;
-  updateAutoBtn();
+  const wholeTree = tree.nodes.size === 0;
+  if (wholeTree) {
+    tree.dead = true;
+    state.auto = false;
+    updateAutoBtn();
+  }
   updateStats();
 
   startFall(tree, result, tree.species, () => {
-    toast('树已倒下 · 按 R 重新种树');
+    if (wholeTree) toast('树已倒下 · 按 R 重新种树');
   });
-  toast('砍伐完成 · 树正在倒下');
+  toast(wholeTree ? '整棵树正在倒下' : '树枝被砍下');
 }
 
 function speciesButton(sp) {

@@ -8,7 +8,7 @@ import {
 } from './treeView.js';
 
 const UP_AXIS = new THREE.Vector3(0, 1, 0);
-let fall = null;
+const falls = [];
 
 /* ------------------------------------------------------------
    方块粒子（骨粉、落叶、扬尘）
@@ -181,14 +181,15 @@ export function startFall(tree, result, species, onLanded) {
     l.z + 0.5 - pivot.z
   ));
 
-  fall = {
-    group, angle: 0, vel: 0.45, axis, landed: false, t: 0, leafT: 0,
+  const fall = {
+    group, angle: 0, vel: 0.45, axis, landed: false, t: 0, leafT: 0, done: false,
     mats: [bMat, lMat, cutMat],
     geos: [cutGeo],
     leafPts,
     leafColor: new THREE.Color(species.leaf),
     onLanded
   };
+  falls.push(fall);
 
   /* 初始树叶飘落 */
   if (leafPts.length) {
@@ -206,15 +207,22 @@ export function startFall(tree, result, species, onLanded) {
 }
 
 export function cancelFall() {
-  if (!fall) return;
-  disposeFall(fall);
-  fall = null;
+  for (const f of falls) disposeFall(f);
+  falls.length = 0;
 }
 
 export function updateFall(dt) {
-  const f = fall;
-  if (!f) return;
+  for (let i = falls.length - 1; i >= 0; i--) {
+    const f = falls[i];
+    updateOneFall(f, dt);
+    if (f.done) {
+      disposeFall(f);
+      falls.splice(i, 1);
+    }
+  }
+}
 
+function updateOneFall(f, dt) {
   if (!f.landed) {
     f.vel += (0.5 + f.angle * 1.35) * dt;
     f.angle += f.vel * dt;
@@ -264,8 +272,7 @@ export function updateFall(dt) {
         m.depthWrite = k < 0.5;
       }
       if (k >= 1) {
-        disposeFall(f);
-        fall = null;
+        f.done = true;
       }
     }
   }
