@@ -1,8 +1,17 @@
 import * as THREE from 'three';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
-import { zipSync } from 'three/addons/libs/fflate.module.js';
-import { Billboard, TreePreset, Tree, TreeType } from '@dgreenheck/ez-tree';
-import { BarkType, LeafType, applyTreeTextures, loadPresetWithTextures } from './textures';
+import { TreePreset, TreeType } from '@dgreenheck/ez-tree';
+import {
+  getBlockDefinitions,
+  getBlockDefinition,
+  setBlockColor,
+  setBlockTexture,
+  setBlockModel,
+  clearBlockCustom,
+  exportBlockConfig,
+  importBlockConfig,
+  refreshBlockMaterials,
+} from './blocks';
 import { Environment } from './environment';
 import { OrbitControls } from 'three/examples/jsm/Addons.js';
 import { version } from '../../package.json';
@@ -33,11 +42,6 @@ const presetLabels = {
 const treeTypeLabels = {
   落叶树: TreeType.Deciduous,
   常绿树: TreeType.Evergreen,
-};
-
-const billboardLabels = {
-  单面: Billboard.Single,
-  双面: Billboard.Double,
 };
 
 // ============================================================================
@@ -336,6 +340,33 @@ function paint() {
   );
 }
 
+/** 触发浏览器下载 */
+function downloadBlob(blob, filename) {
+  const link = document.getElementById('downloadLink');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+function readAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+function readAsArrayBuffer(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(file);
+  });
+}
+
 /**
  * Creates a button.
  *
@@ -484,8 +515,9 @@ let controls = [];
  * @param {THREE.Camera} camera
  * @param {OrbitControls} orbitControls
  * @param {String} initialPreset
+ * @param {import('./voxelTree').VoxelTree} voxel
  */
-export function setupUI(tree, environment, renderer, scene, camera, orbitControls, initialPreset) {
+export function setupUI(tree, environment, renderer, scene, camera, orbitControls, initialPreset, voxel) {
   const container = document.getElementById('ui-container');
   container.innerHTML = '';
   controls = [];
@@ -551,39 +583,38 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
   scrollArea.appendChild(exportTab);
 
   // ============================================================================
-  // Stats Overlay (viewport HUD) with LOD preview switching
+  // Stats Overlay (viewport HUD) + 生长控制
   // ============================================================================
-
-  // The hero tree always generates at full detail; the LOD buttons re-mesh
-  // its geometry at a chosen level via createGeometry() so it can be
-  // inspected at any camera distance without THREE.LOD auto-switching.
-  let previewLevel = 0;
-  let lastBuildMs = null;
 
   const statsOverlay = document.createElement('div');
   statsOverlay.id = 'stats-overlay';
   statsOverlay.innerHTML = `
     <div class="stats-counts">
       <div class="stats-stat">
-        <span class="stats-value" data-stat="triangles">0</span>
-        <span class="stats-label">三角形</span>
+        <span class="stats-value" data-stat="grown">0</span>
+        <span class="stats-label">已生长</span>
       </div>
       <div class="stats-stat">
-        <span class="stats-value" data-stat="vertices">0</span>
-        <span class="stats-label">顶点</span>
+        <span class="stats-value" data-stat="total">0</span>
+        <span class="stats-label">树木方块</span>
       </div>
       <div class="stats-stat">
-        <span class="stats-value" data-stat="buildtime">–</span>
-        <span class="stats-label">构建耗时 ms</span>
+        <span class="stats-value" data-stat="progress">0%</span>
+        <span class="stats-label">生长进度</span>
       </div>
     </div>
-    <div class="lod-switcher"></div>
+    <div class="lod-switcher">
+      <button class="lod-button active" data-action="toggle">暂停</button>
+      <button class="lod-button" data-action="replay">重新生长</button>
+    </div>
   `;
   container.appendChild(statsOverlay);
 
-  const statsTriangles = statsOverlay.querySelector('[data-stat="triangles"]');
-  const statsVertices = statsOverlay.querySelector('[data-stat="vertices"]');
-  const statsBuildTime = statsOverlay.querySelector('[data-stat="buildtime"]');
+  const statsGrown = statsOverlay.querySelector('[data-stat="grown"]');
+  const statsTotal = statsOverlay.querySelector('[data-stat="total"]');
+  const statsProgress = statsOverlay.querySelector('[data-stat="progress"]');
+  const growthToggleBtn = statsOverlay.querySelector('[data-action="toggle"]');
+  const growthReplayBtn = statsOverlay.querySelector('[data-action="replay"]');
 
   /** Briefly highlights a stat value so live changes are visible */
   function pulseStat(el) {
@@ -592,66 +623,51 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
     el.classList.add('pulse');
   }
 
-  const lodSwitcher = statsOverlay.querySelector('.lod-switcher');
-  const lodButtons = Tree.defaultLODLevels.map((level, i) => {
-    const btn = document.createElement('button');
-    btn.className = 'lod-button' + (i === 0 ? ' active' : '');
-    btn.textContent = i === 0 ? '完整' : `LOD${i}`;
-    btn.title = i === 0
-      ? '完整细节'
-      : `预览细节等级 ${i}（在 ${level.distance} 单位处切换）`;
-    btn.addEventListener('click', () => setPreviewLevel(i));
-    lodSwitcher.appendChild(btn);
-    return btn;
+  growthToggleBtn.addEventListener('click', () => {
+    voxel.setPlaying(!voxel.playing);
+    growthToggleBtn.textContent = voxel.playing ? '暂停' : '继续';
+    growthToggleBtn.classList.toggle('active', voxel.playing);
   });
 
-  function applyLODPreview() {
-    const detail = Tree.defaultLODLevels[previewLevel]?.detail ?? {};
-    const t0 = performance.now();
-    const { branches, leaves } = tree.createGeometry(detail);
-    lastBuildMs = performance.now() - t0;
-    tree.branchesMesh.geometry.dispose();
-    tree.branchesMesh.geometry = branches;
-    tree.leavesMesh.geometry.dispose();
-    tree.leavesMesh.geometry = leaves;
-  }
+  growthReplayBtn.addEventListener('click', () => {
+    voxel.replay();
+    growthToggleBtn.textContent = '暂停';
+    growthToggleBtn.classList.add('active');
+  });
 
-  function setPreviewLevel(level) {
-    previewLevel = level;
-    lodButtons.forEach((b, i) => b.classList.toggle('active', i === level));
-    applyLODPreview();
-    updateInfoDisplays();
-  }
-
-  /** Vertex/triangle counts of the geometry currently on screen */
-  function displayedCounts() {
-    const gb = tree.branchesMesh.geometry;
-    const gl = tree.leavesMesh.geometry;
-    return {
-      vertices: (gb.attributes.position?.count ?? 0) + (gl.attributes.position?.count ?? 0),
-      triangles: ((gb.index?.count ?? 0) + (gl.index?.count ?? 0)) / 3,
-    };
-  }
+  voxel.onStats = () => updateInfoDisplays();
 
   // ============================================================================
   // Parameters Tab Content
   // ============================================================================
 
+  let rebuildQueued = false;
   const onChange = () => {
-    applyTreeTextures(tree);
-    const t0 = performance.now();
-    tree.generate();
-    lastBuildMs = performance.now() - t0;
-    if (previewLevel > 0) {
-      applyLODPreview();
-    }
-    tree.traverse((o) => {
-      if (o.material) {
-        o.material.needsUpdate = true;
-      }
+    // 滑块会连续触发，合并到下一帧只重建一次
+    if (rebuildQueued) return;
+    rebuildQueued = true;
+    requestAnimationFrame(() => {
+      rebuildQueued = false;
+      tree.generate();
+      voxel.rebuild(tree, {
+        blockSize: voxel.blockSize,
+        leafDensity: voxel.leafDensity,
+      });
+      growthToggleBtn.textContent = '暂停';
+      growthToggleBtn.classList.add('active');
+      updateInfoDisplays();
     });
-    // Update info displays
-    updateInfoDisplays();
+  };
+
+  let terrainQueued = false;
+  const queueTerrainRebuild = () => {
+    if (terrainQueued) return;
+    terrainQueued = true;
+    requestAnimationFrame(() => {
+      terrainQueued = false;
+      environment.terrain.rebuild();
+      updateInfoDisplays();
+    });
   };
 
   // ----- Presets Section -----
@@ -661,10 +677,13 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
     Object.fromEntries(Object.keys(TreePreset).map(p => [presetLabels[p] || p, p])),
     initialPreset,
     (val) => {
-      loadPresetWithTextures(tree, val);
-      if (previewLevel > 0) {
-        applyLODPreview();
-      }
+      tree.loadPreset(val);
+      voxel.rebuild(tree, {
+        blockSize: voxel.blockSize,
+        leafDensity: voxel.leafDensity,
+      });
+      growthToggleBtn.textContent = '暂停';
+      growthToggleBtn.classList.add('active');
       refreshAllControls();
     }
   );
@@ -687,52 +706,8 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
 
   parametersTab.appendChild(presetsSection.element);
 
-  // ----- Bark Section -----
-  const barkSection = createSection('树皮', 'cube', false);
-
-  const barkTypeSelect = createSelect('类型', BarkType, tree.options.bark.type, (val) => {
-    tree.options.bark.type = val;
-    onChange();
-  });
-  barkSection.add(barkTypeSelect);
-  controls.push({ control: barkTypeSelect, update: () => barkTypeSelect.setValue(tree.options.bark.type) });
-
-  const barkTintPicker = createColorPicker('色调', tree.options.bark.tint, (val) => {
-    tree.options.bark.tint = val;
-    onChange();
-  });
-  barkSection.add(barkTintPicker);
-  controls.push({ control: barkTintPicker, update: () => barkTintPicker.setValue(tree.options.bark.tint) });
-
-  const flatShadingToggle = createToggle('平面着色', tree.options.bark.flatShading, (val) => {
-    tree.options.bark.flatShading = val;
-    onChange();
-  });
-  barkSection.add(flatShadingToggle);
-  controls.push({ control: flatShadingToggle, update: () => flatShadingToggle.setValue(tree.options.bark.flatShading) });
-
-  const texturedToggle = createToggle('纹理', tree.options.bark.textured, (val) => {
-    tree.options.bark.textured = val;
-    onChange();
-  });
-  barkSection.add(texturedToggle);
-  controls.push({ control: texturedToggle, update: () => texturedToggle.setValue(tree.options.bark.textured) });
-
-  const texScaleXSlider = createSlider('纹理缩放 X', tree.options.bark.textureScale.x, 0.5, 5, 0.1, (val) => {
-    tree.options.bark.textureScale.x = val;
-    onChange();
-  });
-  barkSection.add(texScaleXSlider);
-  controls.push({ control: texScaleXSlider, update: () => texScaleXSlider.setValue(tree.options.bark.textureScale.x) });
-
-  const texScaleYSlider = createSlider('纹理缩放 Y', tree.options.bark.textureScale.y, 0.5, 5, 0.1, (val) => {
-    tree.options.bark.textureScale.y = val;
-    onChange();
-  });
-  barkSection.add(texScaleYSlider);
-  controls.push({ control: texScaleYSlider, update: () => texScaleYSlider.setValue(tree.options.bark.textureScale.y) });
-
-  parametersTab.appendChild(barkSection.element);
+  // 树干 / 树叶的颜色与贴图统一在「方块定义」中设置，
+  // 平滑网格的树皮参数不再适用于体素模式。
 
   // ----- Branches Section -----
   const branchSection = createSection('树枝', 'share', false);
@@ -893,28 +868,8 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
   parametersTab.appendChild(branchSection.element);
 
   // ----- Leaves Section -----
+  // 这些参数影响骨架上的叶片分布，进而决定体素树叶的簇位置与大小。
   const leavesSection = createSection('树叶', 'sparkles', false);
-
-  const leafTypeSelect = createSelect('类型', LeafType, tree.options.leaves.type, (val) => {
-    tree.options.leaves.type = val;
-    onChange();
-  });
-  leavesSection.add(leafTypeSelect);
-  controls.push({ control: leafTypeSelect, update: () => leafTypeSelect.setValue(tree.options.leaves.type) });
-
-  const leafTintPicker = createColorPicker('色调', tree.options.leaves.tint, (val) => {
-    tree.options.leaves.tint = val;
-    onChange();
-  });
-  leavesSection.add(leafTintPicker);
-  controls.push({ control: leafTintPicker, update: () => leafTintPicker.setValue(tree.options.leaves.tint) });
-
-  const billboardSelect = createSelect('朝向模式', billboardLabels, tree.options.leaves.billboard, (val) => {
-    tree.options.leaves.billboard = val;
-    onChange();
-  });
-  leavesSection.add(billboardSelect);
-  controls.push({ control: billboardSelect, update: () => billboardSelect.setValue(tree.options.leaves.billboard) });
 
   const leafAngleSlider = createSlider('角度', tree.options.leaves.angle, 0, 100, 1, (val) => {
     tree.options.leaves.angle = val;
@@ -951,21 +906,245 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
   leavesSection.add(leafVarianceSlider);
   controls.push({ control: leafVarianceSlider, update: () => leafVarianceSlider.setValue(tree.options.leaves.sizeVariance) });
 
-  const alphaTestSlider = createSlider('Alpha 测试', tree.options.leaves.alphaTest, 0, 1, 0.01, (val) => {
-    tree.options.leaves.alphaTest = val;
-    onChange();
-  });
-  leavesSection.add(alphaTestSlider);
-  controls.push({ control: alphaTestSlider, update: () => alphaTestSlider.setValue(tree.options.leaves.alphaTest) });
-
-  const roundedNormalsToggle = createToggle('圆润法线', tree.options.leaves.roundedNormals, (val) => {
-    tree.options.leaves.roundedNormals = val;
-    onChange();
-  });
-  leavesSection.add(roundedNormalsToggle);
-  controls.push({ control: roundedNormalsToggle, update: () => roundedNormalsToggle.setValue(tree.options.leaves.roundedNormals) });
-
   parametersTab.appendChild(leavesSection.element);
+
+  // ----- Voxel & Growth Section -----
+  const voxelSection = createSection('体素与生长', 'cube', true);
+
+  const blockSizeSlider = createSlider('方块尺寸', voxel.blockSize, 0.25, 3, 0.25, (val) => {
+    voxel.blockSize = val;
+    environment.terrain.options.blockSize = val;
+    onChange();
+    queueTerrainRebuild();
+  });
+  voxelSection.add(blockSizeSlider);
+  controls.push({
+    control: blockSizeSlider,
+    update: () => blockSizeSlider.setValue(voxel.blockSize),
+  });
+
+  const growthDurationSlider = createSlider('生长时长 (秒)', voxel.duration, 2, 60, 1, (val) => {
+    voxel.setDuration(val);
+  });
+  voxelSection.add(growthDurationSlider);
+  controls.push({
+    control: growthDurationSlider,
+    update: () => growthDurationSlider.setValue(voxel.duration),
+  });
+
+  const leafDensitySlider = createSlider('树叶密度', voxel.leafDensity, 0.2, 2, 0.1, (val) => {
+    voxel.leafDensity = val;
+    onChange();
+  });
+  voxelSection.add(leafDensitySlider);
+  controls.push({
+    control: leafDensitySlider,
+    update: () => leafDensitySlider.setValue(voxel.leafDensity),
+  });
+
+  const growthProgressDisplay = createDisplay(
+    '生长进度',
+    voxel.progress,
+    (v) => `${Math.round(v * 100)}%`,
+  );
+  voxelSection.add(growthProgressDisplay);
+
+  const replayGrowthBtn = createButton('重新生长', 'dice', () => {
+    voxel.replay();
+    growthToggleBtn.textContent = '暂停';
+    growthToggleBtn.classList.add('active');
+    updateInfoDisplays();
+  });
+  voxelSection.add(replayGrowthBtn);
+
+  parametersTab.appendChild(voxelSection.element);
+
+  // ----- Block Definition Section -----
+  const blockSection = createSection('方块定义', 'swatch', false);
+
+  const blockDefs = getBlockDefinitions();
+  const blockTypeOptions = Object.fromEntries(blockDefs.map((d) => [d.label, d.id]));
+  let currentBlockId = 'log';
+
+  const blockColorPicker = createColorPicker(
+    '颜色',
+    getBlockDefinition(currentBlockId).color,
+    (val) => {
+      setBlockColor(currentBlockId, val);
+    },
+  );
+
+  const blockTypeSelect = createSelect('方块类型', blockTypeOptions, currentBlockId, (val) => {
+    currentBlockId = val;
+    blockColorPicker.setValue(getBlockDefinition(val).color);
+    const def = getBlockDefinition(val);
+    if (def.model) {
+      blockStatus.setValue(`当前使用自定义模型：${def.model.name}`);
+    } else if (def.textureUrl) {
+      blockStatus.setValue('当前使用自定义贴图');
+    } else {
+      blockStatus.setValue('默认程序化像素纹理');
+    }
+  });
+  blockSection.add(blockTypeSelect);
+
+  blockSection.add(blockColorPicker);
+  controls.push({
+    control: blockColorPicker,
+    update: () => blockColorPicker.setValue(getBlockDefinition(currentBlockId).color),
+  });
+
+  const blockStatus = createDisplay('状态', '默认程序化像素纹理');
+  blockSection.add(blockStatus);
+
+  const rebuildBlocks = () => {
+    refreshBlockMaterials();
+    voxel.rebuild(tree, {
+      blockSize: voxel.blockSize,
+      leafDensity: voxel.leafDensity,
+    });
+    environment.terrain.rebuild();
+    growthToggleBtn.textContent = '暂停';
+    growthToggleBtn.classList.add('active');
+    updateInfoDisplays();
+  };
+
+  // 自定义贴图
+  const textureInput = document.createElement('input');
+  textureInput.type = 'file';
+  textureInput.accept = 'image/*';
+  textureInput.style.display = 'none';
+  document.body.appendChild(textureInput);
+
+  const importTextureBtn = createButton('导入贴图', 'photo', () => textureInput.click());
+  blockSection.add(importTextureBtn);
+
+  textureInput.addEventListener('change', async () => {
+    const file = textureInput.files?.[0];
+    textureInput.value = '';
+    if (!file) return;
+    const label = getBlockDefinition(currentBlockId).label;
+    try {
+      blockStatus.setValue('正在导入贴图…');
+      await setBlockTexture(currentBlockId, await readAsDataUrl(file));
+      blockStatus.setValue(`已为「${label}」设置自定义贴图`);
+    } catch (err) {
+      console.error(err);
+      blockStatus.setValue('贴图导入失败');
+    }
+  });
+
+  // 自定义 GLB 模型
+  const modelInput = document.createElement('input');
+  modelInput.type = 'file';
+  modelInput.accept = '.glb,.gltf,model/gltf-binary';
+  modelInput.style.display = 'none';
+  document.body.appendChild(modelInput);
+
+  const importModelBtn = createButton('导入 GLB 模型', 'cubeTransparent', () => modelInput.click());
+  blockSection.add(importModelBtn);
+
+  modelInput.addEventListener('change', async () => {
+    const file = modelInput.files?.[0];
+    modelInput.value = '';
+    if (!file) return;
+    const label = getBlockDefinition(currentBlockId).label;
+    try {
+      blockStatus.setValue('正在导入模型…');
+      await setBlockModel(currentBlockId, await readAsArrayBuffer(file), file.name);
+      rebuildBlocks();
+      blockStatus.setValue(`已为「${label}」设置自定义模型`);
+    } catch (err) {
+      console.error(err);
+      blockStatus.setValue('模型导入失败');
+    }
+  });
+
+  const clearBlockBtn = createButton('恢复默认外观', 'dice', () => {
+    const id = currentBlockId;
+    clearBlockCustom(id);
+    blockColorPicker.setValue(getBlockDefinition(id).color);
+    rebuildBlocks();
+    blockStatus.setValue('已恢复默认外观');
+  });
+  blockSection.add(clearBlockBtn);
+
+  // JSON 方块配置
+  const blocksInput = document.createElement('input');
+  blocksInput.type = 'file';
+  blocksInput.accept = '.json,application/json';
+  blocksInput.style.display = 'none';
+  document.body.appendChild(blocksInput);
+
+  const exportBlocksConfigBtn = createButton('导出方块配置 JSON', 'download', () => {
+    const json = JSON.stringify(exportBlockConfig(), null, 2);
+    downloadBlob(new Blob([json], { type: 'application/json' }), 'blocks.json');
+  });
+  blockSection.add(exportBlocksConfigBtn);
+
+  const importBlocksConfigBtn = createButton('导入方块配置 JSON', 'folderOpen', () => blocksInput.click());
+  blockSection.add(importBlocksConfigBtn);
+
+  blocksInput.addEventListener('change', async () => {
+    const file = blocksInput.files?.[0];
+    blocksInput.value = '';
+    if (!file) return;
+    try {
+      blockStatus.setValue('正在导入配置…');
+      await importBlockConfig(JSON.parse(await file.text()));
+      blockColorPicker.setValue(getBlockDefinition(currentBlockId).color);
+      rebuildBlocks();
+      blockStatus.setValue('方块配置导入完成');
+    } catch (err) {
+      console.error(err);
+      blockStatus.setValue('配置导入失败');
+    }
+  });
+
+  parametersTab.appendChild(blockSection.element);
+
+  // ----- Terrain Section -----
+  const terrainSection = createSection('地形', 'sun', false);
+  const terrainOptions = environment.terrain.options;
+
+  const islandRadiusSlider = createSlider('岛屿半径', terrainOptions.radius, 16, 80, 1, (val) => {
+    terrainOptions.radius = val;
+    queueTerrainRebuild();
+  });
+  terrainSection.add(islandRadiusSlider);
+  controls.push({
+    control: islandRadiusSlider,
+    update: () => islandRadiusSlider.setValue(terrainOptions.radius),
+  });
+
+  const terrainHeightSlider = createSlider('地形起伏', terrainOptions.height, 0, 6, 0.5, (val) => {
+    terrainOptions.height = val;
+    queueTerrainRebuild();
+  });
+  terrainSection.add(terrainHeightSlider);
+  controls.push({
+    control: terrainHeightSlider,
+    update: () => terrainHeightSlider.setValue(terrainOptions.height),
+  });
+
+  const terrainSeedSlider = createSlider('地形种子', terrainOptions.seed, 0, 9999, 1, (val) => {
+    terrainOptions.seed = val;
+    queueTerrainRebuild();
+  });
+  terrainSection.add(terrainSeedSlider);
+  controls.push({
+    control: terrainSeedSlider,
+    update: () => terrainSeedSlider.setValue(terrainOptions.seed),
+  });
+
+  const waterToggle = createToggle('水面', terrainOptions.water, (val) => {
+    terrainOptions.water = val;
+    queueTerrainRebuild();
+  });
+  terrainSection.add(waterToggle);
+  controls.push({ control: waterToggle, update: () => waterToggle.setValue(terrainOptions.water) });
+
+  parametersTab.appendChild(terrainSection.element);
 
   // ----- Trellis Section -----
   const trellisSection = createSection('棚架', 'share', false);
@@ -1101,22 +1280,28 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
   environmentSection.add(sunAzimuthSlider);
   controls.push({ control: sunAzimuthSlider, update: () => sunAzimuthSlider.setValue(environment.skybox.sunAzimuth) });
 
-  const grassCountSlider = createSlider('草地数量', environment.grass.instanceCount, 0, 25000, 100, (val) => {
-    environment.grass.instanceCount = val;
+  const sunElevationSlider = createSlider('太阳高度', environment.skybox.sunElevation, 5, 85, 1, (val) => {
+    environment.skybox.sunElevation = val;
   });
-  environmentSection.add(grassCountSlider);
-  controls.push({ control: grassCountSlider, update: () => grassCountSlider.setValue(environment.grass.instanceCount) });
+  environmentSection.add(sunElevationSlider);
+  controls.push({ control: sunElevationSlider, update: () => sunElevationSlider.setValue(environment.skybox.sunElevation) });
 
   parametersTab.appendChild(environmentSection.element);
 
   // ----- Info Section -----
   const infoSection = createSection('信息', 'info', false);
 
-  const vertexDisplay = createDisplay('顶点数', tree.vertexCount, (v) => Math.round(v).toLocaleString());
-  infoSection.add(vertexDisplay);
+  const totalBlocksDisplay = createDisplay('树木方块', voxel.counts.total, (v) => Math.round(v).toLocaleString());
+  infoSection.add(totalBlocksDisplay);
 
-  const triangleDisplay = createDisplay('三角形数', tree.triangleCount, (v) => Math.round(v).toLocaleString());
-  infoSection.add(triangleDisplay);
+  const logBlocksDisplay = createDisplay('树干方块', voxel.counts.log, (v) => Math.round(v).toLocaleString());
+  infoSection.add(logBlocksDisplay);
+
+  const leafBlocksDisplay = createDisplay('树叶方块', voxel.counts.leaves, (v) => Math.round(v).toLocaleString());
+  infoSection.add(leafBlocksDisplay);
+
+  const terrainBlocksDisplay = createDisplay('地形方块', environment.terrain.blockCount, (v) => Math.round(v).toLocaleString());
+  infoSection.add(terrainBlocksDisplay);
 
   const versionDisplay = createDisplay('版本', version);
   infoSection.add(versionDisplay);
@@ -1128,16 +1313,24 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
 
   parametersTab.appendChild(infoSection.element);
 
+  let lastStatsGrown = -1;
+
   function updateInfoDisplays() {
-    const { vertices, triangles } = displayedCounts();
-    vertexDisplay.setValue(vertices);
-    triangleDisplay.setValue(triangles);
-    statsVertices.textContent = Math.round(vertices).toLocaleString();
-    statsTriangles.textContent = Math.round(triangles).toLocaleString();
-    statsBuildTime.textContent = lastBuildMs == null ? '–' : Math.max(1, Math.round(lastBuildMs)).toString();
-    pulseStat(statsTriangles);
-    pulseStat(statsVertices);
-    pulseStat(statsBuildTime);
+    totalBlocksDisplay.setValue(voxel.counts.total);
+    logBlocksDisplay.setValue(voxel.counts.log);
+    leafBlocksDisplay.setValue(voxel.counts.leaves);
+    terrainBlocksDisplay.setValue(environment.terrain.blockCount);
+    growthProgressDisplay.setValue(voxel.progress);
+
+    statsGrown.textContent = Math.round(voxel.grown).toLocaleString();
+    statsTotal.textContent = Math.round(voxel.counts.total).toLocaleString();
+    statsProgress.textContent = `${Math.round(voxel.progress * 100)}%`;
+
+    if (voxel.grown !== lastStatsGrown) {
+      lastStatsGrown = voxel.grown;
+      pulseStat(statsGrown);
+      pulseStat(statsProgress);
+    }
   }
 
   // ============================================================================
@@ -1189,80 +1382,36 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
     return () => restores.forEach((restore) => restore());
   }
 
-  const exportGlbBtn = createButton('导出 GLB（完整细节）', 'download', async ({ setStatus }) => {
+  const exportGlbBtn = createButton('导出 GLB（体素树）', 'download', async ({ setStatus }) => {
     setStatus('正在导出 GLB…');
-    // Export at full detail regardless of the active LOD preview
-    const restoreLevel = previewLevel;
-    if (restoreLevel !== 0) {
-      setPreviewLevel(0);
-    }
     const restoreTextures = stripBrokenTextures(tree);
+    let group = null;
     try {
       await paint();
+      group = voxel.toMergedGroup();
       const glb = await new Promise((resolve, reject) =>
-        exporter.parse(tree, resolve, reject, { binary: true }),
+        exporter.parse(group, resolve, reject, { binary: true }),
       );
-      const blob = new Blob([glb], { type: 'application/octet-stream' });
-      const link = document.getElementById('downloadLink');
-      link.href = window.URL.createObjectURL(blob);
-      link.download = 'tree.glb';
-      link.click();
+      downloadBlob(new Blob([glb], { type: 'application/octet-stream' }), 'voxel-tree.glb');
     } catch (err) {
       console.error(err);
     } finally {
       restoreTextures();
-      if (restoreLevel !== 0) {
-        setPreviewLevel(restoreLevel);
-      }
+      group?.traverse((o) => {
+        if (o.isMesh) o.geometry.dispose();
+      });
     }
   });
   exportModelsSection.add(exportGlbBtn);
 
-  const exportLodsBtn = createButton('导出 LOD（ZIP）', 'archive', async ({ setStatus }) => {
-    const restoreTextures = stripBrokenTextures(tree);
-    try {
-      const files = {};
-      for (let i = 0; i < Tree.defaultLODLevels.length; i++) {
-        setStatus(`正在导出 LOD ${i + 1}/${Tree.defaultLODLevels.length}…`);
-        await paint();
-
-        const { detail } = Tree.defaultLODLevels[i];
-        const { branches, leaves } = tree.createGeometry(detail ?? {});
-
-        try {
-          const branchesMesh = new THREE.Mesh(branches, tree.branchesMesh.material);
-          branchesMesh.name = `Branches_LOD${i}`;
-          const leavesMesh = new THREE.Mesh(leaves, tree.leavesMesh.material);
-          leavesMesh.name = `Leaves_LOD${i}`;
-          const group = new THREE.Group();
-          group.name = `Tree_LOD${i}`;
-          group.add(branchesMesh, leavesMesh);
-
-          const glb = await new Promise((resolve, reject) =>
-            exporter.parse(group, resolve, reject, { binary: true }),
-          );
-          files[`tree_LOD${i}.glb`] = new Uint8Array(glb);
-        } finally {
-          branches.dispose();
-          leaves.dispose();
-        }
-      }
-
-      setStatus('正在压缩…');
-      await paint();
-
-      const blob = new Blob([zipSync(files)], { type: 'application/zip' });
-      const link = document.getElementById('downloadLink');
-      link.href = URL.createObjectURL(blob);
-      link.download = 'tree_lods.zip';
-      link.click();
-    } catch (err) {
-      console.error(err);
-    } finally {
-      restoreTextures();
-    }
+  const exportBlocksBtn = createButton('导出方块数据 JSON', 'document', () => {
+    const data = voxel.exportBlocksJson();
+    downloadBlob(
+      new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }),
+      'voxel-blocks.json',
+    );
   });
-  exportModelsSection.add(exportLodsBtn);
+  exportModelsSection.add(exportBlocksBtn);
 
   const exportPngBtn = createButton('导出 PNG', 'photo', async ({ setStatus }) => {
     setStatus('正在导出 PNG…');
@@ -1272,21 +1421,29 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
     const fog = scene.fog;
     scene.fog = null;
 
+    // 记录可见性，导出后原样恢复
+    const visibility = [];
+    scene.traverse((o) => {
+      if (o.isMesh || o.isInstancedMesh) visibility.push([o, o.visible]);
+    });
+
     scene.traverse((o) => {
       if (o.name === 'Skybox') {
         o.material.side = THREE.FrontSide;
-      } else if (o.isMesh) {
+      } else if (o.isMesh || o.isInstancedMesh) {
         o.visible = false;
       }
     });
-    tree.traverse((o) => o.visible = true);
+    // 只保留体素树
+    voxel.traverse((o) => {
+      if (o.isInstancedMesh) o.visible = true;
+    });
 
     try {
       renderer.render(scene, camera);
-
       const link = document.getElementById('downloadLink');
       link.href = renderer.domElement.toDataURL('image/png');
-      link.download = 'tree.png';
+      link.download = 'voxel-tree.png';
       link.click();
     } catch (err) {
       console.error(err);
@@ -1297,8 +1454,8 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
         if (o.name === 'Skybox') {
           o.material.side = THREE.BackSide;
         }
-        o.visible = true;
       });
+      for (const [o, visible] of visibility) o.visible = visible;
     }
   });
   exportModelsSection.add(exportPngBtn);
@@ -1335,9 +1492,12 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
         try {
           tree.options = JSON.parse(e.target.result);
           tree.generate();
-          if (previewLevel > 0) {
-            applyLODPreview();
-          }
+          voxel.rebuild(tree, {
+            blockSize: voxel.blockSize,
+            leafDensity: voxel.leafDensity,
+          });
+          growthToggleBtn.textContent = '暂停';
+          growthToggleBtn.classList.add('active');
           refreshAllControls();
         } catch (error) {
           console.error('Error parsing JSON:', error);

@@ -1,26 +1,22 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { Tree, TreePreset } from '@dgreenheck/ez-tree';
+import { Tree } from '@dgreenheck/ez-tree';
 import { Environment } from './environment';
-import { loadPresetWithTextures } from './textures';
+import { VoxelTree } from './voxelTree';
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function paintUI() {
-  return new Promise(resolve => requestAnimationFrame(resolve));
-}
-
 /**
- * Creates a new instance of the Three.js scene
- * @param {THREE.WebGLRenderer} renderer 
- * @returns 
+ * Creates a new instance of the Three.js scene.
+ * @param {THREE.WebGLRenderer} renderer
  */
 export async function createScene(renderer) {
   const scene = new THREE.Scene();
   scene.fog = new THREE.FogExp2(0x94b9f8, 0.0015);
 
+  // 体素岛屿地形 + 天空盒 + 云
   const environment = new Environment();
   scene.add(environment);
 
@@ -30,86 +26,42 @@ export async function createScene(renderer) {
     0.1,
     2000,
   );
-  camera.position.set(100, 20, 0);
+  camera.position.set(95, 65, 95);
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.enablePan = true;
-  controls.minPolarAngle = Math.PI / 2 - 0.2;
-  controls.maxPolarAngle = Math.PI / 2 + 0.13;
-  controls.minDistance = 10;
-  controls.maxDistance = 150;
+  controls.minPolarAngle = Math.PI * 0.15;
+  controls.maxPolarAngle = Math.PI / 2 - 0.02;
+  controls.minDistance = 3;
+  controls.maxDistance = 300;
   controls.target.set(0, 25, 0);
   controls.update();
 
+  // 保留 EZ-Tree 的骨架生成与参数系统，但不再渲染平滑网格
   const tree = new Tree();
-  loadPresetWithTextures(tree, 'Ash Medium');
-  tree.castShadow = true;
-  tree.receiveShadow = true;
+  tree.loadPreset('Ash Medium');
+  tree.branchesMesh.visible = false;
+  tree.leavesMesh.visible = false;
   scene.add(tree);
 
-  // Add a forest of trees in the background
-  const forest = new THREE.Group();
-  forest.name = 'Forest';
+  // 把骨架体素化成方块树
+  const voxel = new VoxelTree();
+  tree.add(voxel);
+  voxel.rebuild(tree);
 
   const logoElement = document.getElementById('logo');
   const progressElement = document.getElementById('loading-text');
-
-  logoElement.style.clipPath = `inset(100% 0% 0% 0%)`;
-  progressElement.innerHTML = '加载中... 0%';
-
-  const treeCount = 100;
-  const minDistance = 175;
-  const maxDistance = 500;
-
-  function createTree() {
-    const r = minDistance + Math.random() * maxDistance;
-    const theta = 2 * Math.PI * Math.random();
-    const presets = Object.keys(TreePreset);
-    const index = Math.floor(Math.random() * presets.length);
-
-    const t = new Tree();
-    t.position.set(r * Math.cos(theta), 0, r * Math.sin(theta));
-    loadPresetWithTextures(t, presets[index], false);
-    t.options.seed = 10000 * Math.random();
-    t.generateLODs();
-    t.castShadow = true;
-    t.receiveShadow = true;
-
-    forest.add(t);
-  }
-
-  async function loadTrees(i) {
-    while (i < treeCount) {
-      createTree();
-
-      const progress = Math.floor(100 * (i + 1) / treeCount);
-
-      // Update progress UI
-      logoElement.style.clipPath = `inset(${100 - progress}% 0% 0% 0%)`;
-      progressElement.innerText = `加载中... ${progress}%`;
-
-      // Wait for the next animation frame to continue
-      await paintUI();
-
-      i++;
-    }
-
-    // All trees are loaded, hide loading screen
-    await sleep(300);
-    logoElement.style.clipPath = `inset(0% 0% 0% 0%)`;
-    document.getElementById('loading-screen').style.display = 'none';
-  }
-
-  // Start the tree loading process
-  await loadTrees(0);
-
-  scene.add(forest);
+  progressElement.innerHTML = '加载中... 100%';
+  logoElement.style.clipPath = 'inset(0% 0% 0% 0%)';
+  await sleep(250);
+  document.getElementById('loading-screen').style.display = 'none';
 
   return {
     scene,
     environment,
     tree,
+    voxel,
     camera,
     controls
   }

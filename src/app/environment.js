@@ -1,25 +1,22 @@
 import * as THREE from 'three';
 import { Skybox } from './skybox';
-import { Ground } from './ground';
-import { Grass } from './grass';
-import { Rocks } from './rocks';
+import { VoxelTerrain } from './voxelTerrain';
 import { Clouds } from './clouds';
 
+/**
+ * 场景环境：体素岛屿 + 天空盒 + 云层。
+ * 原有的平滑地面、草丛与岩石已被体素地形替代。
+ */
 export class Environment extends THREE.Object3D {
   constructor() {
     super();
 
-    this.ground = new Ground();
-    this.add(this.ground);
-
-    this.grass = new Grass();
-    this.add(this.grass);
+    this.terrain = new VoxelTerrain();
+    this.terrain.rebuild();
+    this.add(this.terrain);
 
     this.skybox = new Skybox();
     this.add(this.skybox);
-
-    this.rocks = new Rocks();
-    this.add(this.rocks);
 
     this.clouds = new Clouds();
     this.clouds.position.set(0, 200, 0);
@@ -28,7 +25,6 @@ export class Environment extends THREE.Object3D {
   }
 
   update(elapsedTime) {
-    this.grass.update(elapsedTime);
     this.clouds.update(elapsedTime);
   }
 }
