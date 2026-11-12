@@ -1,0 +1,66 @@
+{
+  "name": "voxel-tree-lab",
+  "description": "面向方块体素游戏的程序化树木生长研究（基于 EZ-Tree / Three.js）",
+  "author": "Qingfeng",
+  "contributors": [
+    {
+      "name": "Daniel Greenheck",
+      "url": "https://github.com/dgreenheck"
+    }
+  ],
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Qingfeng-gt/voxel-tree-lab.git"
+  },
+  "homepage": "https://github.com/Qingfeng-gt/voxel-tree-lab",
+  "bugs": {
+    "url": "https://github.com/Qingfeng-gt/voxel-tree-lab/issues"
+  },
+  "type": "module",
+  "main": "build/ez-tree.umd.js",
+  "module": "build/ez-tree.es.js",
+  "exports": {
+    ".": {
+      "import": "./build/ez-tree.es.js",
+      "require": "./build/ez-tree.umd.js"
+    }
+  },
+  "files": [
+    "build",
+    "src",
+    "LICENSE",
+    "package.json",
+    "README.md"
+  ],
+  "types": "./build/ez-tree.es.d.ts",
+  "scripts": {
+    "dev": "vite --config vite.app.config.js",
+    "build:app": "vite build --config vite.app.config.js",
+    "build:lib": "vite build --config vite.lib.config.js",
+    "build:watch": "vite build --config vite.lib.config.js --watch",
+    "app": "npm run build:lib && vite --config vite.app.config.js",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@types/three": "^0.169.0",
+    "prettier": "3.3.3",
+    "three": "^0.167.x",
+    "vite": "^5.0.0",
+    "vite-plugin-dts": "^3.9.1",
+    "vite-plugin-static-copy": "^1.0.5"
+  },
+  "peerDependencies": {
+    "three": ">=0.167"
+  },
+  "keywords": [
+    "voxel",
+    "tree",
+    "tree-growth",
+    "procedural",
+    "generation",
+    "threejs"
+  ],
+  "dependencies": {}
+}
