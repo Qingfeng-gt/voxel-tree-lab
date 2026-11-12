@@ -50,6 +50,13 @@ export async function createScene(renderer) {
   tree.add(voxel);
   voxel.rebuild(tree);
 
+  // 支持通过 ?stage=0..4 直接预览生长阶段
+  const stageParam = new URLSearchParams(window.location.search).get('stage');
+  if (stageParam !== null) {
+    const stage = Number.parseInt(stageParam, 10);
+    if (Number.isFinite(stage)) voxel.setStage(stage);
+  }
+
   const logoElement = document.getElementById('logo');
   const progressElement = document.getElementById('loading-text');
   progressElement.innerHTML = '加载中... 100%';

@@ -13,6 +13,7 @@ import {
   refreshBlockMaterials,
 } from './blocks';
 import { Environment } from './environment';
+import { GROWTH_STAGES } from './voxelTree';
 import { OrbitControls } from 'three/examples/jsm/Addons.js';
 import { version } from '../../package.json';
 
@@ -583,7 +584,7 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
   scrollArea.appendChild(exportTab);
 
   // ============================================================================
-  // Stats Overlay (viewport HUD) + 生长控制
+  // Stats Overlay (viewport HUD) + 阶段控制
   // ============================================================================
 
   const statsOverlay = document.createElement('div');
@@ -591,30 +592,30 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
   statsOverlay.innerHTML = `
     <div class="stats-counts">
       <div class="stats-stat">
-        <span class="stats-value" data-stat="grown">0</span>
-        <span class="stats-label">已生长</span>
+        <span class="stats-value" data-stat="stage">成熟</span>
+        <span class="stats-label">阶段</span>
       </div>
       <div class="stats-stat">
         <span class="stats-value" data-stat="total">0</span>
         <span class="stats-label">树木方块</span>
       </div>
       <div class="stats-stat">
-        <span class="stats-value" data-stat="progress">0%</span>
-        <span class="stats-label">生长进度</span>
+        <span class="stats-value" data-stat="height">0</span>
+        <span class="stats-label">树高（方块）</span>
       </div>
     </div>
     <div class="lod-switcher">
-      <button class="lod-button active" data-action="toggle">暂停</button>
-      <button class="lod-button" data-action="replay">重新生长</button>
+      <button class="lod-button" data-action="prev">上一阶段</button>
+      <button class="lod-button" data-action="next">下一阶段</button>
     </div>
   `;
   container.appendChild(statsOverlay);
 
-  const statsGrown = statsOverlay.querySelector('[data-stat="grown"]');
+  const statsStage = statsOverlay.querySelector('[data-stat="stage"]');
   const statsTotal = statsOverlay.querySelector('[data-stat="total"]');
-  const statsProgress = statsOverlay.querySelector('[data-stat="progress"]');
-  const growthToggleBtn = statsOverlay.querySelector('[data-action="toggle"]');
-  const growthReplayBtn = statsOverlay.querySelector('[data-action="replay"]');
+  const statsHeight = statsOverlay.querySelector('[data-stat="height"]');
+  const stagePrevBtn = statsOverlay.querySelector('[data-action="prev"]');
+  const stageNextBtn = statsOverlay.querySelector('[data-action="next"]');
 
   /** Briefly highlights a stat value so live changes are visible */
   function pulseStat(el) {
@@ -623,19 +624,26 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
     el.classList.add('pulse');
   }
 
-  growthToggleBtn.addEventListener('click', () => {
-    voxel.setPlaying(!voxel.playing);
-    growthToggleBtn.textContent = voxel.playing ? '暂停' : '继续';
-    growthToggleBtn.classList.toggle('active', voxel.playing);
-  });
+  let stageSelectControl = null;
 
-  growthReplayBtn.addEventListener('click', () => {
-    voxel.replay();
-    growthToggleBtn.textContent = '暂停';
-    growthToggleBtn.classList.add('active');
-  });
+  function syncStageControls() {
+    statsStage.textContent = voxel.stageName;
+    pulseStat(statsStage);
+    if (stageSelectControl) stageSelectControl.setValue(String(voxel.stage));
+    stagePrevBtn.style.opacity = voxel.stage === 0 ? 0.4 : 1;
+    stageNextBtn.style.opacity = voxel.stage === voxel.maxStage ? 0.4 : 1;
+  }
 
-  voxel.onStats = () => updateInfoDisplays();
+  function changeStage(delta) {
+    const next = voxel.stage + delta;
+    if (next < 0 || next > voxel.maxStage) return;
+    voxel.setStage(next);
+    syncStageControls();
+    updateInfoDisplays();
+  }
+
+  stagePrevBtn.addEventListener('click', () => changeStage(-1));
+  stageNextBtn.addEventListener('click', () => changeStage(1));
 
   // ============================================================================
   // Parameters Tab Content
@@ -651,10 +659,12 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
       tree.generate();
       voxel.rebuild(tree, {
         blockSize: voxel.blockSize,
+        treeScale: voxel.treeScale,
+        canopyStart: voxel.canopyStart,
         leafDensity: voxel.leafDensity,
+        stage: voxel.stage,
       });
-      growthToggleBtn.textContent = '暂停';
-      growthToggleBtn.classList.add('active');
+      syncStageControls();
       updateInfoDisplays();
     });
   };
@@ -680,10 +690,12 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
       tree.loadPreset(val);
       voxel.rebuild(tree, {
         blockSize: voxel.blockSize,
+        treeScale: voxel.treeScale,
+        canopyStart: voxel.canopyStart,
         leafDensity: voxel.leafDensity,
+        stage: voxel.stage,
       });
-      growthToggleBtn.textContent = '暂停';
-      growthToggleBtn.classList.add('active');
+      syncStageControls();
       refreshAllControls();
     }
   );
@@ -911,6 +923,23 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
   // ----- Voxel & Growth Section -----
   const voxelSection = createSection('体素与生长', 'cube', true);
 
+  const stageSelect = createSelect(
+    '生长阶段',
+    Object.fromEntries(GROWTH_STAGES.map((stage, index) => [stage.name, String(index)])),
+    String(voxel.stage),
+    (val) => {
+      voxel.setStage(Number(val));
+      syncStageControls();
+      updateInfoDisplays();
+    },
+  );
+  stageSelectControl = stageSelect;
+  voxelSection.add(stageSelect);
+  controls.push({
+    control: stageSelect,
+    update: () => stageSelect.setValue(String(voxel.stage)),
+  });
+
   const treeScaleSlider = createSlider('树木缩放', voxel.treeScale, 0.04, 0.3, 0.01, (val) => {
     voxel.treeScale = val;
     onChange();
@@ -933,15 +962,6 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
     update: () => blockSizeSlider.setValue(voxel.blockSize),
   });
 
-  const growthDurationSlider = createSlider('生长时长 (秒)', voxel.duration, 2, 60, 1, (val) => {
-    voxel.setDuration(val);
-  });
-  voxelSection.add(growthDurationSlider);
-  controls.push({
-    control: growthDurationSlider,
-    update: () => growthDurationSlider.setValue(voxel.duration),
-  });
-
   const leafDensitySlider = createSlider('树叶密度', voxel.leafDensity, 0.2, 2, 0.1, (val) => {
     voxel.leafDensity = val;
     onChange();
@@ -962,21 +982,6 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
     update: () => canopyStartSlider.setValue(voxel.canopyStart),
   });
 
-  const growthProgressDisplay = createDisplay(
-    '生长进度',
-    voxel.progress,
-    (v) => `${Math.round(v * 100)}%`,
-  );
-  voxelSection.add(growthProgressDisplay);
-
-  const replayGrowthBtn = createButton('重新生长', 'dice', () => {
-    voxel.replay();
-    growthToggleBtn.textContent = '暂停';
-    growthToggleBtn.classList.add('active');
-    updateInfoDisplays();
-  });
-  voxelSection.add(replayGrowthBtn);
-
   parametersTab.appendChild(voxelSection.element);
 
   // ----- Block Definition Section -----
@@ -984,7 +989,7 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
 
   const blockDefs = getBlockDefinitions();
   const blockTypeOptions = Object.fromEntries(blockDefs.map((d) => [d.label, d.id]));
-  let currentBlockId = 'log';
+  let currentBlockId = 'trunk';
 
   const blockColorPicker = createColorPicker(
     '颜色',
@@ -1021,11 +1026,13 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
     refreshBlockMaterials();
     voxel.rebuild(tree, {
       blockSize: voxel.blockSize,
+      treeScale: voxel.treeScale,
+      canopyStart: voxel.canopyStart,
       leafDensity: voxel.leafDensity,
+      stage: voxel.stage,
     });
     environment.terrain.rebuild();
-    growthToggleBtn.textContent = '暂停';
-    growthToggleBtn.classList.add('active');
+    syncStageControls();
     updateInfoDisplays();
   };
 
@@ -1314,8 +1321,17 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
   const totalBlocksDisplay = createDisplay('树木方块', voxel.counts.total, (v) => Math.round(v).toLocaleString());
   infoSection.add(totalBlocksDisplay);
 
-  const logBlocksDisplay = createDisplay('树干方块', voxel.counts.log, (v) => Math.round(v).toLocaleString());
-  infoSection.add(logBlocksDisplay);
+  const stageDisplay = createDisplay('生长阶段', voxel.stage, (v) => GROWTH_STAGES[v]?.name ?? '');
+  infoSection.add(stageDisplay);
+
+  const trunkBlocksDisplay = createDisplay('树干方块', voxel.counts.trunk, (v) => Math.round(v).toLocaleString());
+  infoSection.add(trunkBlocksDisplay);
+
+  const branchBlocksDisplay = createDisplay('树枝方块', voxel.counts.branch, (v) => Math.round(v).toLocaleString());
+  infoSection.add(branchBlocksDisplay);
+
+  const twigBlocksDisplay = createDisplay('细枝方块', voxel.counts.twig, (v) => Math.round(v).toLocaleString());
+  infoSection.add(twigBlocksDisplay);
 
   const leafBlocksDisplay = createDisplay('树叶方块', voxel.counts.leaves, (v) => Math.round(v).toLocaleString());
   infoSection.add(leafBlocksDisplay);
@@ -1336,25 +1352,19 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
 
   parametersTab.appendChild(infoSection.element);
 
-  let lastStatsGrown = -1;
-
   function updateInfoDisplays() {
     totalBlocksDisplay.setValue(voxel.counts.total);
-    logBlocksDisplay.setValue(voxel.counts.log);
+    stageDisplay.setValue(voxel.stage);
+    trunkBlocksDisplay.setValue(voxel.counts.trunk);
+    branchBlocksDisplay.setValue(voxel.counts.branch);
+    twigBlocksDisplay.setValue(voxel.counts.twig);
     leafBlocksDisplay.setValue(voxel.counts.leaves);
     terrainBlocksDisplay.setValue(environment.terrain.blockCount);
     treeHeightDisplay.setValue(voxel.heightBlocks);
-    growthProgressDisplay.setValue(voxel.progress);
 
-    statsGrown.textContent = Math.round(voxel.grown).toLocaleString();
+    statsStage.textContent = voxel.stageName;
     statsTotal.textContent = Math.round(voxel.counts.total).toLocaleString();
-    statsProgress.textContent = `${Math.round(voxel.progress * 100)}%`;
-
-    if (voxel.grown !== lastStatsGrown) {
-      lastStatsGrown = voxel.grown;
-      pulseStat(statsGrown);
-      pulseStat(statsProgress);
-    }
+    statsHeight.textContent = Math.round(voxel.heightBlocks).toLocaleString();
   }
 
   // ============================================================================
@@ -1518,10 +1528,12 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
           tree.generate();
           voxel.rebuild(tree, {
             blockSize: voxel.blockSize,
+            treeScale: voxel.treeScale,
+            canopyStart: voxel.canopyStart,
             leafDensity: voxel.leafDensity,
+            stage: voxel.stage,
           });
-          growthToggleBtn.textContent = '暂停';
-          growthToggleBtn.classList.add('active');
+          syncStageControls();
           refreshAllControls();
         } catch (error) {
           console.error('Error parsing JSON:', error);
@@ -1543,6 +1555,7 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
   }
 
   // Initialize the stats overlay with the current tree's counts
+  syncStageControls();
   updateInfoDisplays();
 
   // Mobile expand/collapse functionality

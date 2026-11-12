@@ -19,7 +19,9 @@ const textureLoader = new THREE.TextureLoader();
 const gltfLoader = new GLTFLoader();
 
 const DEFAULT_DEFINITIONS = [
-  { id: 'log', label: '木头', color: 0x7a5230 },
+  { id: 'trunk', label: '树干', color: 0x6e4a2f },
+  { id: 'branch', label: '树枝', color: 0x8b5e3a },
+  { id: 'twig', label: '细枝', color: 0xb08052 },
   { id: 'leaves', label: '树叶', color: 0x4f8b3a },
   { id: 'grass', label: '草方块', color: 0x6cae46 },
   { id: 'dirt', label: '泥土', color: 0x8a6242 },
@@ -108,7 +110,9 @@ function createProceduralTexture(id) {
       const r = rand();
       let shade;
       switch (id) {
-        case 'log':
+        case 'trunk':
+        case 'branch':
+        case 'twig':
           shade = 0.68 + 0.24 * r;
           if ((x + Math.floor(y / 4)) % 6 === 0) shade -= 0.14;
           if (r > 0.94) shade -= 0.18;
@@ -162,28 +166,6 @@ function createProceduralTexture(id) {
 // 材质
 // ============================================================================
 
-/**
- * 给材质注入生长动画：每个实例带一个 aGrow（出现时间 0~1），
- * uProgress 到达该时间后实例从 0 平滑放大到 1。
- */
-function attachGrowthShader(material) {
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.uProgress = { value: 0 };
-    shader.uniforms.uPopWindow = { value: 0.035 };
-    shader.vertexShader =
-      'attribute float aGrow;\nuniform float uProgress;\nuniform float uPopWindow;\n' +
-      shader.vertexShader;
-    shader.vertexShader = shader.vertexShader.replace(
-      '#include <begin_vertex>',
-      `#include <begin_vertex>
-       float voxelGrow = smoothstep(aGrow, aGrow + uPopWindow, uProgress);
-       transformed *= voxelGrow;`,
-    );
-    material.userData.growthShader = shader;
-  };
-  material.customProgramCacheKey = () => 'voxel-growth';
-}
-
 function applyDefinitionToMaterial(id, material) {
   const def = registry.get(id);
   if (!def) return;
@@ -235,7 +217,6 @@ export function getBlockMaterial(id, usage = 'terrain') {
   material.side = THREE.FrontSide;
 
   applyDefinitionToMaterial(id, material);
-  if (usage === 'tree') attachGrowthShader(material);
 
   cache.set(id, material);
   return material;
@@ -404,13 +385,17 @@ export async function importBlockConfig(config) {
 // ============================================================================
 
 /**
- * 把一组方块坐标创建成一个 InstancedMesh。
+ * 把一组方块创建成一个 InstancedMesh。
+ *
+ * 方块可以是：
+ *  - 世界坐标 {x, y, z, size, type}：直接使用（树木使用不同尺寸的方块）
+ *  - 网格坐标 {ix, iy, iz}：按 scale 计算中心（地形使用）
+ *
  * @param {string} id 方块类型
- * @param {{ix:number, iy:number, iz:number}[]} blocks 方块整数坐标
+ * @param {object[]} blocks 方块列表
  * @param {object} options
- * @param {number} [options.scale] 方块世界尺寸
+ * @param {number} [options.scale] 网格坐标的方块世界尺寸
  * @param {'tree'|'terrain'|'export'} [options.usage]
- * @param {number[]|null} [options.growthTimes] 与 blocks 对应的出现时间（0~1）
  * @param {number} [options.colorVariation] 每个方块的亮度随机扰动幅度（0~1）
  */
 export function createInstancedLayer(id, blocks, {
@@ -418,7 +403,6 @@ export function createInstancedLayer(id, blocks, {
   usage = 'terrain',
   castShadow = true,
   receiveShadow = true,
-  growthTimes = null,
   colorVariation = 0,
 } = {}) {
   const geometry = getBlockGeometry(id).clone();
@@ -432,28 +416,28 @@ export function createInstancedLayer(id, blocks, {
   const dummy = new THREE.Object3D();
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i];
-    dummy.position.set((b.ix + 0.5) * scale, (b.iy + 0.5) * scale, (b.iz + 0.5) * scale);
-    dummy.scale.setScalar(scale);
+    const px = b.x ?? (b.ix + 0.5) * scale;
+    const py = b.y ?? (b.iy + 0.5) * scale;
+    const pz = b.z ?? (b.iz + 0.5) * scale;
+    const size = b.size ?? scale;
+    dummy.position.set(px, py, pz);
+    dummy.scale.setScalar(size);
     dummy.updateMatrix();
     mesh.setMatrixAt(i, dummy.matrix);
   }
   mesh.instanceMatrix.needsUpdate = true;
-
-  if (growthTimes) {
-    geometry.setAttribute(
-      'aGrow',
-      new THREE.InstancedBufferAttribute(new Float32Array(growthTimes), 1),
-    );
-  }
 
   // 逐方块亮度扰动，打散纹理重复产生的条纹
   if (colorVariation > 0) {
     const color = new THREE.Color();
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i];
-      let h = Math.imul(b.ix + 0x1234, 374761393) ^
-              Math.imul(b.iy + 0x2345, 668265263) ^
-              Math.imul(b.iz + 0x3456, 1442695041);
+      const gx = Math.round((b.x ?? (b.ix + 0.5) * scale) * 16);
+      const gy = Math.round((b.y ?? (b.iy + 0.5) * scale) * 16);
+      const gz = Math.round((b.z ?? (b.iz + 0.5) * scale) * 16);
+      let h = Math.imul(gx + 0x1234, 374761393) ^
+              Math.imul(gy + 0x2345, 668265263) ^
+              Math.imul(gz + 0x3456, 1442695041);
       h = Math.imul(h ^ (h >>> 13), 1274126177);
       const t = ((h ^ (h >>> 16)) >>> 0) / 4294967296;
       const k = 1 - colorVariation * 0.5 + colorVariation * t;

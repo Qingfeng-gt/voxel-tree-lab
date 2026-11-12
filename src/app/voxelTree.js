@@ -9,23 +9,34 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
-/** 返回排序数组中第一个大于 value 的下标 */
-function upperBound(times, value) {
-  let lo = 0;
-  let hi = times.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (times[mid] <= value) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
+/**
+ * 五个生长阶段。每个阶段重新构建一棵完整的小树，
+ * 保证任何阶段看起来都是一棵树，而不是“半棵树”。
+ *
+ * trunkCut：树干保留比例（相对树干自然高度）
+ * maxLevel：包含的最高分枝层级
+ * tuftRadius/tuftCount：该阶段在枝头生成的叶簇大小与数量
+ * useLeaves：使用原始叶片骨架（最终成熟阶段）
+ */
+export const GROWTH_STAGES = [
+  { name: '树苗', trunkCut: 0.22, maxLevel: 0, tuftRadius: 1.1, tuftCount: 9 },
+  { name: '幼树', trunkCut: 0.42, maxLevel: 1, tuftRadius: 1.15, tuftCount: 8 },
+  { name: '小树', trunkCut: 0.78, maxLevel: 1, tuftRadius: 1.3, tuftCount: 8 },
+  { name: '成树', trunkCut: 1.0, maxLevel: 2, tuftRadius: 1.35, tuftCount: 7 },
+  { name: '成熟', trunkCut: 1.0, maxLevel: Infinity, useLeaves: true },
+];
+
+// 树干 / 树枝 / 细枝 / 树叶 的方块尺寸（相对一个方块）
+const BLOCK_SIZES = {
+  trunk: 1.0,
+  branch: 0.5,
+  twig: 0.35,
+  leaves: 0.8,
+};
 
 /**
- * 把 EZ-Tree 生成的树枝骨架转换成体素方块，并管理生长动画。
- *
- * 生长顺序：按方块到树根的距离排序，树干从下往上长，
- * 侧枝向外长，树叶在枝干之后出现。
+ * 把 EZ-Tree 生成的树枝骨架转换成由不同尺寸方块组成的体素树，
+ * 并按阶段（树苗 → 成熟）展示。
  */
 export class VoxelTree extends THREE.Group {
   constructor() {
@@ -33,364 +44,474 @@ export class VoxelTree extends THREE.Group {
     this.name = 'VoxelTree';
 
     this.blockSize = 1;
-    this.treeScale = 0.10;
-    this.canopyStart = 0.45;
+    this.treeScale = 0.1;
+    this.canopyStart = 0.6;
     this.leafDensity = 1;
-    this.duration = 8; // 完整生长一次的秒数
-    this.progress = 0;
-    this.playing = true;
-    this.popWindow = 0.035;
+    this.stage = GROWTH_STAGES.length - 1;
+    this.maxStage = GROWTH_STAGES.length - 1;
 
-    /** @type {{id: string, mesh: THREE.InstancedMesh, times: Float32Array, count: number}[]} */
+    /** @type {{id: string, mesh: THREE.InstancedMesh}[]} */
     this.blockLayers = [];
-    /** @type {{ix:number, iy:number, iz:number, type:string, t:number}[]} */
+    /** @type {{type: string, x: number, y: number, z: number, size: number}[]} */
     this.blockList = [];
-    this.counts = { total: 0, log: 0, leaves: 0 };
+    this.counts = { total: 0, trunk: 0, branch: 0, twig: 0, leaves: 0 };
     this.heightBlocks = 0;
-    this.grown = 0;
 
-    /** 生长统计回调（每 100ms 触发一次） */
-    this.onStats = null;
-    this._statsTimer = 0;
-
+    this._tree = null;
     this._vector = new THREE.Vector3();
     this._segment = new THREE.Vector3();
     this._closest = new THREE.Vector3();
-    this._normal = new THREE.Vector3();
     this._offset = new THREE.Vector3();
+    this._pointA = new THREE.Vector3();
+    this._pointB = new THREE.Vector3();
   }
 
   /**
-   * 根据树的骨架重建体素。
+   * 根据树的骨架重建指定阶段的体素。
    * @param {import('@dgreenheck/ez-tree').Tree} tree
-   * @param {{blockSize?: number, treeScale?: number, canopyStart?: number, leafDensity?: number}} options
+   * @param {{blockSize?: number, treeScale?: number, canopyStart?: number, leafDensity?: number, stage?: number}} options
    */
   rebuild(tree, {
     blockSize = this.blockSize,
     treeScale = this.treeScale,
     canopyStart = this.canopyStart,
     leafDensity = this.leafDensity,
+    stage = this.stage,
   } = {}) {
-    this.disposeLayers();
+    this._tree = tree;
     this.blockSize = blockSize;
     this.treeScale = treeScale;
     this.canopyStart = canopyStart;
     this.leafDensity = leafDensity;
+    this.stage = Math.max(0, Math.min(this.maxStage, Math.round(stage)));
+    this.#build();
+  }
 
-    const skeleton = tree.skeleton;
-    if (!skeleton) {
-      this.progress = 0;
-      return;
-    }
+  /** 切换到指定阶段（不重新生成树木骨架） */
+  setStage(stage) {
+    const next = Math.max(0, Math.min(this.maxStage, Math.round(stage)));
+    if (next === this.stage) return;
+    this.stage = next;
+    this.#build();
+  }
 
-    const bs = blockSize;
-    const scale = treeScale;
-    // 让树干轴线穿过方块中心，细枝才能是干净的 1 格宽
+  get stageName() {
+    return GROWTH_STAGES[this.stage]?.name ?? '';
+  }
+
+  #build() {
+    this.disposeLayers();
+
+    const tree = this._tree;
+    const skeleton = tree?.skeleton;
+    if (!skeleton) return;
+
+    const bs = this.blockSize;
+    const scale = this.treeScale;
+    const stageDef = GROWTH_STAGES[this.stage];
     const offsetX = bs / 2;
     const offsetZ = bs / 2;
+    const branchStep = bs * 0.5;
 
-    /** @type {Map<string, {ix:number, iy:number, iz:number, type:string}>} */
     const map = new Map();
+    const rng = new RNG(((tree.options.seed >>> 0) ^ 0x51ed270b) >>> 0);
 
-    // 树干 / 树枝：逐段体素化；细枝用 1 格宽的线条
-    const pointA = new THREE.Vector3();
-    const pointB = new THREE.Vector3();
+    // 树干自然高度（缩放后）
+    let trunkHeight = 0;
     for (const branch of skeleton.branches) {
+      if ((branch.level ?? 0) !== 0) continue;
+      for (const section of branch.sections) {
+        trunkHeight = Math.max(trunkHeight, section.origin.y * scale);
+      }
+    }
+    const cutY = stageDef.trunkCut >= 1
+      ? Infinity
+      : trunkHeight * stageDef.trunkCut;
+
+    // ---------------------------------------------------------------------
+    // 树干（完整大小的方块）
+    // ---------------------------------------------------------------------
+    const trunkTop = new THREE.Vector3(offsetX, 0, offsetZ);
+    for (const branch of skeleton.branches) {
+      if ((branch.level ?? 0) !== 0) continue;
       const sections = branch.sections;
       for (let i = 0; i < sections.length - 1; i++) {
-        pointA.copy(sections[i].origin).multiplyScalar(scale);
-        pointB.copy(sections[i + 1].origin).multiplyScalar(scale);
-        pointA.x += offsetX;
-        pointA.z += offsetZ;
-        pointB.x += offsetX;
-        pointB.z += offsetZ;
+        const a = this._pointA.copy(sections[i].origin).multiplyScalar(scale);
+        const b = this._pointB.copy(sections[i + 1].origin).multiplyScalar(scale);
+        a.x += offsetX; a.z += offsetZ;
+        b.x += offsetX; b.z += offsetZ;
+
+        if (a.y >= cutY) break;
+
+        let end = b;
+        if (b.y > cutY) {
+          const t = (cutY - a.y) / ((b.y - a.y) || 1);
+          end = a.clone().lerp(b, clamp01(t));
+        }
+
+        this.#voxelizeTrunk(
+          map,
+          a,
+          end,
+          sections[i].radius * scale,
+          sections[i + 1].radius * scale,
+          bs,
+        );
+        trunkTop.copy(end);
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // 树枝 / 细枝（半格大小的小方块）
+    // ---------------------------------------------------------------------
+    const tuftAnchors = [];
+    for (const branch of skeleton.branches) {
+      const level = branch.level ?? 0;
+      if (level === 0) continue;
+      if (level > stageDef.maxLevel) continue;
+
+      const sections = branch.sections;
+      const attachY = sections[0].origin.y * scale;
+      if (cutY !== Infinity && attachY > cutY) continue;
+
+      const type = level === 1 ? 'branch' : 'twig';
+      for (let i = 0; i < sections.length - 1; i++) {
+        const a = this._pointA.copy(sections[i].origin).multiplyScalar(scale);
+        const b = this._pointB.copy(sections[i + 1].origin).multiplyScalar(scale);
+        a.x += offsetX; a.z += offsetZ;
+        b.x += offsetX; b.z += offsetZ;
 
         const radiusA = sections[i].radius * scale;
         const radiusB = sections[i + 1].radius * scale;
-
-        if (Math.max(radiusA, radiusB) <= bs * 0.75) {
-          this.#voxelizeLine(map, pointA, pointB, bs);
+        if (Math.max(radiusA, radiusB) <= branchStep * 0.75) {
+          this.#voxelizeLineNode(map, a, b, branchStep, type);
         } else {
-          this.#voxelizeSegment(map, pointA, pointB, radiusA, radiusB, bs);
+          this.#voxelizeCylinderNode(map, a, b, radiusA, radiusB, branchStep, type);
         }
       }
-    }
 
-    // 树叶：在每片叶子的位置生成一小簇方块
-    const rng = new RNG(((tree.options.seed >>> 0) ^ 0x51ed270b) >>> 0);
-    const leafOrigin = new THREE.Vector3();
-
-    // 树冠只保留上部，让树干露出来（更像游戏里的树）
-    let maxLeafY = 0;
-    for (const leaf of skeleton.leaves) {
-      maxLeafY = Math.max(maxLeafY, leaf.origin.y * scale);
-    }
-    const minLeafY = maxLeafY * canopyStart;
-
-    for (const leaf of skeleton.leaves) {
-      leafOrigin.copy(leaf.origin).multiplyScalar(scale);
-      if (leafOrigin.y < minLeafY) continue;
-      leafOrigin.x += offsetX;
-      leafOrigin.z += offsetZ;
-      this.#addLeafCluster(map, leafOrigin, leaf.orientation, leaf.size * scale, bs, rng);
-    }
-
-    const blocks = [...map.values()];
-
-    // 计算生长时间：越靠近根部越早出现，树叶整体延后
-    let maxDistance = 1;
-    for (const block of blocks) {
-      const x = (block.ix + 0.5) * bs;
-      const y = (block.iy + 0.5) * bs;
-      const z = (block.iz + 0.5) * bs;
-      block.distance = Math.sqrt(x * x + y * y + z * z);
-      maxDistance = Math.max(maxDistance, block.distance);
-    }
-
-    for (const block of blocks) {
-      const n = block.distance / maxDistance;
-      if (block.type === 'leaves') {
-        block.t = clamp01(0.5 + 0.5 * n + (rng.random() - 0.5) * 0.02);
-      } else {
-        block.t = clamp01(0.85 * n + (rng.random() - 0.5) * 0.015);
+      if (level === stageDef.maxLevel) {
+        tuftAnchors.push(this._pointB.clone());
       }
     }
 
-    // 按类型分组并按生长时间排序
+    // ---------------------------------------------------------------------
+    // 树叶
+    // ---------------------------------------------------------------------
+    if (stageDef.useLeaves) {
+      let maxLeafY = 0;
+      for (const leaf of skeleton.leaves) {
+        maxLeafY = Math.max(maxLeafY, leaf.origin.y * scale);
+      }
+      const minLeafY = maxLeafY * this.canopyStart;
+
+      const leafOrigin = new THREE.Vector3();
+      for (const leaf of skeleton.leaves) {
+        leafOrigin.copy(leaf.origin).multiplyScalar(scale);
+        if (leafOrigin.y < minLeafY) continue;
+        leafOrigin.x += offsetX;
+        leafOrigin.z += offsetZ;
+
+        const radius = Math.max(bs * 1.1, leaf.size * scale * 0.6);
+        const count = Math.max(1, Math.min(
+          12,
+          Math.round((radius / bs) * (radius / bs) * 2.8 * this.leafDensity),
+        ));
+        this.#scatterLeaves(map, leafOrigin, radius, count, bs, rng);
+      }
+
+      // 用椭球裁掉四角，形成圆润的树冠轮廓
+      this.#roundCanopy(map, bs);
+    } else {
+      // 早期阶段：树干顶端和每个末级枝头各来一簇叶子
+      this.#scatterLeaves(
+        map,
+        trunkTop,
+        stageDef.tuftRadius * bs,
+        stageDef.tuftCount,
+        bs,
+        rng,
+      );
+      for (const anchor of tuftAnchors) {
+        this.#scatterLeaves(
+          map,
+          anchor,
+          stageDef.tuftRadius * bs,
+          stageDef.tuftCount,
+          bs,
+          rng,
+        );
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // 构建实例化网格
+    // ---------------------------------------------------------------------
+    const blocks = [...map.values()];
     const byType = new Map();
     for (const block of blocks) {
       if (!byType.has(block.type)) byType.set(block.type, []);
       byType.get(block.type).push(block);
     }
 
-    for (const [type, list] of byType) {
-      list.sort((a, b) => a.t - b.t);
-      const times = new Float32Array(list.length);
-      for (let i = 0; i < list.length; i++) times[i] = list[i].t;
-
+    const order = ['trunk', 'branch', 'twig', 'leaves'];
+    for (const type of order) {
+      const list = byType.get(type);
+      if (!list || list.length === 0) continue;
       const mesh = createInstancedLayer(type, list, {
-        scale: bs,
         usage: 'tree',
-        growthTimes: times,
         castShadow: true,
         receiveShadow: true,
-        colorVariation: 0.08,
+        colorVariation: type === 'leaves' ? 0.12 : 0.08,
       });
-      mesh.count = 0;
       this.add(mesh);
-      this.blockLayers.push({ id: type, mesh, times, count: list.length });
+      this.blockLayers.push({ id: type, mesh });
     }
 
     this.blockList = blocks;
-    this.counts.total = blocks.length;
-    this.counts.log = byType.get('log')?.length ?? 0;
-    this.counts.leaves = byType.get('leaves')?.length ?? 0;
+    this.counts = {
+      total: blocks.length,
+      trunk: byType.get('trunk')?.length ?? 0,
+      branch: byType.get('branch')?.length ?? 0,
+      twig: byType.get('twig')?.length ?? 0,
+      leaves: byType.get('leaves')?.length ?? 0,
+    };
 
-    let maxIy = 0;
-    for (const block of blocks) maxIy = Math.max(maxIy, block.iy);
-    this.heightBlocks = maxIy + 1;
-
-    this.progress = 0;
-    this.playing = true;
-    this._statsTimer = 0;
-    this.#applyGrowth();
-    this.#emitStats();
-  }
-
-  /**
-   * 逐帧推进生长动画。
-   * @param {number} delta 秒
-   */
-  update(delta) {
-    if (this.playing && this.progress < 1) {
-      this.progress = Math.min(1, this.progress + delta / Math.max(0.1, this.duration));
+    let maxTop = 0;
+    for (const block of blocks) {
+      maxTop = Math.max(maxTop, block.y + block.size / 2);
     }
-    // 每帧都同步一次，确保材质编译后暂停状态下也能正确显示
-    this.#applyGrowth();
-
-    this._statsTimer += delta;
-    if (this._statsTimer >= 0.1) {
-      this._statsTimer = 0;
-      this.#emitStats();
-    }
+    this.heightBlocks = Math.max(1, Math.round(maxTop / bs));
   }
 
-  setPlaying(playing) {
-    this.playing = playing;
+  // -------------------------------------------------------------------------
+  // 体素化辅助
+  // -------------------------------------------------------------------------
+
+  /** 在方块网格上记录一个方块（中心对齐到单元格中心） */
+  #addCellBlock(map, type, x, y, z, size, grid) {
+    const gx = Math.floor(x / grid);
+    const gy = Math.floor(y / grid);
+    const gz = Math.floor(z / grid);
+    const key = `${type}:${gx},${gy},${gz}`;
+    if (map.has(key)) return;
+    map.set(key, {
+      type,
+      x: (gx + 0.5) * grid,
+      y: (gy + 0.5) * grid,
+      z: (gz + 0.5) * grid,
+      size,
+    });
   }
 
-  setDuration(seconds) {
-    this.duration = Math.max(0.1, seconds);
+  /** 在细网格上记录一个方块（中心对齐到网格节点） */
+  #addNodeBlock(map, type, x, y, z, size, grid) {
+    const gx = Math.round(x / grid);
+    const gy = Math.round(y / grid);
+    const gz = Math.round(z / grid);
+    const key = `${type}:${gx},${gy},${gz}`;
+    if (map.has(key)) return;
+    map.set(key, {
+      type,
+      x: gx * grid,
+      y: gy * grid,
+      z: gz * grid,
+      size,
+    });
   }
 
-  setProgress(progress) {
-    this.progress = clamp01(progress);
-    this.#applyGrowth();
-    this.#emitStats();
-  }
-
-  replay() {
-    this.progress = 0;
-    this.playing = true;
-    this.#applyGrowth();
-    this.#emitStats();
-  }
-
-  #applyGrowth() {
-    const threshold = this.progress * (1 + this.popWindow);
-    let grown = 0;
-
-    for (const layer of this.blockLayers) {
-      layer.mesh.count = upperBound(layer.times, threshold);
-      grown += upperBound(layer.times, this.progress);
-
-      const shader = layer.mesh.material.userData.growthShader;
-      if (shader) {
-        shader.uniforms.uProgress.value = threshold;
-        shader.uniforms.uPopWindow.value = this.popWindow;
-      }
-    }
-    this.grown = grown;
-  }
-
-  #emitStats() {
-    this.onStats?.(this);
-  }
-
-  /**
-   * 把一段树枝（近似为半径线性变化的圆柱）填充成方块。
-   */
-  #voxelizeSegment(map, originA, originB, radiusA, radiusB, bs) {
+  /** 树干：完整大小的方块，按圆柱范围填充 */
+  #voxelizeTrunk(map, originA, originB, radiusA, radiusB, bs) {
     const pad = Math.max(radiusA, radiusB) + bs;
-    const minIx = Math.floor((Math.min(originA.x, originB.x) - pad) / bs - 0.5);
-    const maxIx = Math.ceil((Math.max(originA.x, originB.x) + pad) / bs - 0.5);
-    const minIy = Math.floor((Math.min(originA.y, originB.y) - pad) / bs - 0.5);
-    const maxIy = Math.ceil((Math.max(originA.y, originB.y) + pad) / bs - 0.5);
-    const minIz = Math.floor((Math.min(originA.z, originB.z) - pad) / bs - 0.5);
-    const maxIz = Math.ceil((Math.max(originA.z, originB.z) + pad) / bs - 0.5);
+    const minX = Math.floor((Math.min(originA.x, originB.x) - pad) / bs - 0.5);
+    const maxX = Math.ceil((Math.max(originA.x, originB.x) + pad) / bs - 0.5);
+    const minY = Math.floor((Math.min(originA.y, originB.y) - pad) / bs - 0.5);
+    const maxY = Math.ceil((Math.max(originA.y, originB.y) + pad) / bs - 0.5);
+    const minZ = Math.floor((Math.min(originA.z, originB.z) - pad) / bs - 0.5);
+    const maxZ = Math.ceil((Math.max(originA.z, originB.z) + pad) / bs - 0.5);
 
     const segment = this._segment.subVectors(originB, originA);
     const lengthSq = segment.lengthSq();
 
-    for (let ix = minIx; ix <= maxIx; ix++) {
-      for (let iy = minIy; iy <= maxIy; iy++) {
-        for (let iz = minIz; iz <= maxIz; iz++) {
+    for (let ix = minX; ix <= maxX; ix++) {
+      for (let iy = minY; iy <= maxY; iy++) {
+        for (let iz = minZ; iz <= maxZ; iz++) {
           const point = this._vector.set(
             (ix + 0.5) * bs,
             (iy + 0.5) * bs,
             (iz + 0.5) * bs,
           );
-
           const t = lengthSq > 1e-12
-            ? Math.max(0, Math.min(1,
+            ? clamp01(
                 ((point.x - originA.x) * segment.x +
                  (point.y - originA.y) * segment.y +
-                 (point.z - originA.z) * segment.z) / lengthSq))
+                 (point.z - originA.z) * segment.z) / lengthSq,
+              )
             : 0;
-
           const closest = this._closest.copy(originA).addScaledVector(segment, t);
           const distance = point.distanceTo(closest);
           const radius = radiusA + (radiusB - radiusA) * t;
+          if (distance > Math.max(radius, bs * 0.55)) continue;
 
-          // 细枝至少保留一个方块宽，避免出现断点
-          const threshold = Math.max(radius, bs * 0.7);
-          if (distance > threshold) continue;
-
-          const key = `${ix},${iy},${iz}`;
+          const key = `trunk:${ix},${iy},${iz}`;
           if (!map.has(key)) {
-            map.set(key, { ix, iy, iz, type: 'log' });
+            map.set(key, {
+              type: 'trunk',
+              x: (ix + 0.5) * bs,
+              y: (iy + 0.5) * bs,
+              z: (iz + 0.5) * bs,
+              size: bs * BLOCK_SIZES.trunk,
+            });
           }
         }
       }
     }
   }
 
-  /**
-   * 细枝使用 1 格宽的线条体素化（类似 Minecraft 的树干/树枝）。
-   */
-  #voxelizeLine(map, originA, originB, bs) {
+  /** 细枝：沿线段逐节点放置小方块 */
+  #voxelizeLineNode(map, originA, originB, grid, type) {
     const length = originA.distanceTo(originB);
-    const steps = Math.max(1, Math.ceil(length / (bs * 0.4)));
+    const steps = Math.max(1, Math.ceil(length / (grid * 0.4)));
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
-      const x = originA.x + (originB.x - originA.x) * t;
-      const y = originA.y + (originB.y - originA.y) * t;
-      const z = originA.z + (originB.z - originA.z) * t;
-      const ix = Math.floor(x / bs);
-      const iy = Math.floor(y / bs);
-      const iz = Math.floor(z / bs);
-      const key = `${ix},${iy},${iz}`;
-      if (!map.has(key)) {
-        map.set(key, { ix, iy, iz, type: 'log' });
+      this.#addNodeBlock(
+        map,
+        type,
+        originA.x + (originB.x - originA.x) * t,
+        originA.y + (originB.y - originA.y) * t,
+        originA.z + (originB.z - originA.z) * t,
+        grid * (type === 'branch' ? 1.0 : 0.7),
+        grid,
+      );
+    }
+  }
+
+  /** 较粗的树枝：按圆柱范围在半格网格上填充 */
+  #voxelizeCylinderNode(map, originA, originB, radiusA, radiusB, grid, type) {
+    const pad = Math.max(radiusA, radiusB) + grid;
+    const minX = Math.floor((Math.min(originA.x, originB.x) - pad) / grid);
+    const maxX = Math.ceil((Math.max(originA.x, originB.x) + pad) / grid);
+    const minY = Math.floor((Math.min(originA.y, originB.y) - pad) / grid);
+    const maxY = Math.ceil((Math.max(originA.y, originB.y) + pad) / grid);
+    const minZ = Math.floor((Math.min(originA.z, originB.z) - pad) / grid);
+    const maxZ = Math.ceil((Math.max(originA.z, originB.z) + pad) / grid);
+
+    const segment = this._segment.subVectors(originB, originA);
+    const lengthSq = segment.lengthSq();
+
+    for (let ix = minX; ix <= maxX; ix++) {
+      for (let iy = minY; iy <= maxY; iy++) {
+        for (let iz = minZ; iz <= maxZ; iz++) {
+          const point = this._vector.set(ix * grid, iy * grid, iz * grid);
+          const t = lengthSq > 1e-12
+            ? clamp01(
+                ((point.x - originA.x) * segment.x +
+                 (point.y - originA.y) * segment.y +
+                 (point.z - originA.z) * segment.z) / lengthSq,
+              )
+            : 0;
+          const closest = this._closest.copy(originA).addScaledVector(segment, t);
+          const distance = point.distanceTo(closest);
+          const radius = radiusA + (radiusB - radiusA) * t;
+          if (distance > Math.max(radius, grid * 0.7)) continue;
+
+          this.#addNodeBlock(
+            map,
+            type,
+            ix * grid,
+            iy * grid,
+            iz * grid,
+            grid * (type === 'branch' ? 1.0 : 0.7),
+            grid,
+          );
+        }
       }
     }
   }
 
-  /**
-   * 在叶子位置生成一小簇树叶方块（球状随机分布）。
-   */
-  #addLeafCluster(map, origin, orientation, size, bs, rng) {
-    const normal = this._normal
-      .set(0, 0, 1)
-      .applyEuler(orientation);
-
-    const radius = Math.max(bs * 1.2, size * 0.6);
-    const count = Math.max(1, Math.min(
-      24,
-      Math.round((radius / bs) * (radius / bs) * 3.5 * this.leafDensity),
-    ));
-
-    const center = this._vector
-      .copy(origin)
-      .addScaledVector(normal, radius * 0.35);
-
-    for (let i = 0; i < count; i++) {
+  /** 在球形范围内随机撒一簇树叶 */
+  #scatterLeaves(map, center, radius, count, bs, rng) {
+    const total = Math.max(1, Math.round(count * this.leafDensity));
+    for (let i = 0; i < total; i++) {
       const offset = this._offset
         .set(rng.random() * 2 - 1, rng.random() * 2 - 1, rng.random() * 2 - 1)
         .normalize()
         .multiplyScalar(radius * Math.cbrt(rng.random()));
 
-      const x = center.x + offset.x;
-      const y = center.y + offset.y;
-      const z = center.z + offset.z;
-
-      const ix = Math.floor(x / bs);
-      const iy = Math.floor(y / bs);
-      const iz = Math.floor(z / bs);
-      const key = `${ix},${iy},${iz}`;
-      if (!map.has(key)) {
-        map.set(key, { ix, iy, iz, type: 'leaves' });
-      }
+      this.#addCellBlock(
+        map,
+        'leaves',
+        center.x + offset.x,
+        center.y + offset.y,
+        center.z + offset.z,
+        bs * BLOCK_SIZES.leaves,
+        bs,
+      );
     }
   }
 
-  /**
-   * 导出所有方块数据（研究/分析用）。
-   */
+  /** 用椭球裁剪树冠，去掉方块轮廓的四角 */
+  #roundCanopy(map, bs) {
+    const leaves = [];
+    for (const [key, block] of map) {
+      if (block.type === 'leaves') leaves.push({ key, block });
+    }
+    if (leaves.length < 8) return;
+
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    let minZ = Infinity, maxZ = -Infinity;
+    for (const { block } of leaves) {
+      minX = Math.min(minX, block.x);
+      maxX = Math.max(maxX, block.x);
+      minY = Math.min(minY, block.y);
+      maxY = Math.max(maxY, block.y);
+      minZ = Math.min(minZ, block.z);
+      maxZ = Math.max(maxZ, block.z);
+    }
+
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const cz = (minZ + maxZ) / 2;
+    const rx = Math.max(bs, (maxX - minX) / 2 + bs * 0.4);
+    const ry = Math.max(bs, (maxY - minY) / 2 + bs * 0.2);
+    const rz = Math.max(bs, (maxZ - minZ) / 2 + bs * 0.4);
+
+    for (const { key, block } of leaves) {
+      const nx = (block.x - cx) / rx;
+      const ny = (block.y - cy) / ry;
+      const nz = (block.z - cz) / rz;
+      if (nx * nx + ny * ny + nz * nz > 1.0) map.delete(key);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 导出
+  // -------------------------------------------------------------------------
+
+  /** 导出所有方块数据（研究/分析用） */
   exportBlocksJson() {
-    const bs = this.blockSize;
     return {
       meta: {
-        blockSize: bs,
+        blockSize: this.blockSize,
+        treeScale: this.treeScale,
+        stage: this.stage,
+        stageName: this.stageName,
         total: this.counts.total,
-        log: this.counts.log,
-        leaves: this.counts.leaves,
+        heightBlocks: this.heightBlocks,
+        counts: { ...this.counts },
       },
       blocks: this.blockList.map((b) => ({
-        x: (b.ix + 0.5) * bs,
-        y: (b.iy + 0.5) * bs,
-        z: (b.iz + 0.5) * bs,
+        x: b.x,
+        y: b.y,
+        z: b.z,
+        size: b.size,
         type: b.type,
-        grow: Number(b.t.toFixed(4)),
       })),
     };
   }
 
-  /**
-   * 把所有方块合并成普通 Mesh（非实例化），便于导出 GLB，
-   * 也方便把体素树导入到其他游戏引擎。
-   * @returns {THREE.Group}
-   */
+  /** 合并成普通 Mesh 组，便于导出 GLB */
   toMergedGroup() {
     const group = new THREE.Group();
     group.name = 'VoxelTreeExport';
@@ -403,19 +524,15 @@ export class VoxelTree extends THREE.Group {
 
     const matrix = new THREE.Matrix4();
     const position = new THREE.Vector3();
-    const scale = new THREE.Vector3();
+    const size = new THREE.Vector3();
     const quaternion = new THREE.Quaternion();
 
     for (const [type, list] of byType) {
       const base = getBlockGeometry(type);
       const geometries = list.map((block) => {
-        position.set(
-          (block.ix + 0.5) * this.blockSize,
-          (block.iy + 0.5) * this.blockSize,
-          (block.iz + 0.5) * this.blockSize,
-        );
-        scale.setScalar(this.blockSize);
-        matrix.compose(position, quaternion, scale);
+        position.set(block.x, block.y, block.z);
+        size.setScalar(block.size);
+        matrix.compose(position, quaternion, size);
         const geometry = base.clone();
         geometry.applyMatrix4(matrix);
         return geometry;
@@ -454,8 +571,7 @@ export class VoxelTree extends THREE.Group {
     }
     this.blockLayers = [];
     this.blockList = [];
-    this.counts = { total: 0, log: 0, leaves: 0 };
+    this.counts = { total: 0, trunk: 0, branch: 0, twig: 0, leaves: 0 };
     this.heightBlocks = 0;
-    this.grown = 0;
   }
 }

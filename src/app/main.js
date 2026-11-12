@@ -37,10 +37,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const clock = new THREE.Clock();
   function animate() {
-    // 推进树木的体素生长动画
-    const delta = Math.min(clock.getDelta(), 0.1);
-    const t = clock.elapsedTime;
-    voxel.update(delta);
+    const t = clock.getElapsedTime();
     environment.update(t);
 
     controls.update();

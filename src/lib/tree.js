@@ -417,6 +417,7 @@ export class Tree extends THREE.Group {
       sections,
       segmentCount: branch.segmentCount,
       baseRadius: branch.radius,
+      level: branch.level,
     });
 
     // Deciduous trees have a terminal branch that grows out of the
