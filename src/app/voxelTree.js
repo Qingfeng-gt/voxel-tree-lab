@@ -33,8 +33,8 @@ export class VoxelTree extends THREE.Group {
     this.name = 'VoxelTree';
 
     this.blockSize = 1;
-    this.treeScale = 0.15;
-    this.canopyStart = 0.35;
+    this.treeScale = 0.10;
+    this.canopyStart = 0.45;
     this.leafDensity = 1;
     this.duration = 8; // 完整生长一次的秒数
     this.progress = 0;
