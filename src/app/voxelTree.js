@@ -27,11 +27,12 @@ export const GROWTH_STAGES = [
 ];
 
 // 树干 / 树枝 / 细枝 / 树叶 的方块尺寸（相对一个方块）
+// 树枝方块略大于半格网格间距，保证相邻方块重叠、枝干连接处没有缝隙
 const BLOCK_SIZES = {
   trunk: 1.0,
-  branch: 0.5,
-  twig: 0.35,
-  leaves: 0.8,
+  branch: 0.8,
+  twig: 0.6,
+  leaves: 1.1,
 };
 
 /**
@@ -183,10 +184,11 @@ export class VoxelTree extends THREE.Group {
 
         const radiusA = sections[i].radius * scale;
         const radiusB = sections[i + 1].radius * scale;
+        const size = bs * BLOCK_SIZES[type];
         if (Math.max(radiusA, radiusB) <= branchStep * 0.75) {
-          this.#voxelizeLineNode(map, a, b, branchStep, type);
+          this.#voxelizeLineNode(map, a, b, branchStep, type, size);
         } else {
-          this.#voxelizeCylinderNode(map, a, b, radiusA, radiusB, branchStep, type);
+          this.#voxelizeCylinderNode(map, a, b, radiusA, radiusB, branchStep, type, size);
         }
       }
 
@@ -214,8 +216,8 @@ export class VoxelTree extends THREE.Group {
 
         const radius = Math.max(bs * 1.1, leaf.size * scale * 0.6);
         const count = Math.max(1, Math.min(
-          12,
-          Math.round((radius / bs) * (radius / bs) * 2.8 * this.leafDensity),
+          16,
+          Math.round((radius / bs) * (radius / bs) * 3.6 * this.leafDensity),
         ));
         this.#scatterLeaves(map, leafOrigin, radius, count, bs, rng);
       }
@@ -263,6 +265,8 @@ export class VoxelTree extends THREE.Group {
         castShadow: true,
         receiveShadow: true,
         colorVariation: type === 'leaves' ? 0.12 : 0.08,
+        randomRotation: type === 'leaves',
+        sizeVariation: type === 'leaves' ? 0.18 : 0,
       });
       this.add(mesh);
       this.blockLayers.push({ id: type, mesh });
@@ -369,7 +373,7 @@ export class VoxelTree extends THREE.Group {
   }
 
   /** 细枝：沿线段逐节点放置小方块 */
-  #voxelizeLineNode(map, originA, originB, grid, type) {
+  #voxelizeLineNode(map, originA, originB, grid, type, size) {
     const length = originA.distanceTo(originB);
     const steps = Math.max(1, Math.ceil(length / (grid * 0.4)));
     for (let i = 0; i <= steps; i++) {
@@ -380,14 +384,14 @@ export class VoxelTree extends THREE.Group {
         originA.x + (originB.x - originA.x) * t,
         originA.y + (originB.y - originA.y) * t,
         originA.z + (originB.z - originA.z) * t,
-        grid * (type === 'branch' ? 1.0 : 0.7),
+        size,
         grid,
       );
     }
   }
 
   /** 较粗的树枝：按圆柱范围在半格网格上填充 */
-  #voxelizeCylinderNode(map, originA, originB, radiusA, radiusB, grid, type) {
+  #voxelizeCylinderNode(map, originA, originB, radiusA, radiusB, grid, type, size) {
     const pad = Math.max(radiusA, radiusB) + grid;
     const minX = Math.floor((Math.min(originA.x, originB.x) - pad) / grid);
     const maxX = Math.ceil((Math.max(originA.x, originB.x) + pad) / grid);
@@ -421,7 +425,7 @@ export class VoxelTree extends THREE.Group {
             ix * grid,
             iy * grid,
             iz * grid,
-            grid * (type === 'branch' ? 1.0 : 0.7),
+            size,
             grid,
           );
         }

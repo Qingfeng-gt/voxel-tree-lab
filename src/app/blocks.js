@@ -15,6 +15,21 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
  */
 
 const BOX_GEOMETRY = new THREE.BoxGeometry(1, 1, 1);
+// 树叶使用多面体叶团模型，而不是立方体
+const LEAF_GEOMETRY = new THREE.IcosahedronGeometry(0.5, 1);
+// 轻微打乱顶点，避免所有叶团都长得一模一样
+{
+  const pos = LEAF_GEOMETRY.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const n = Math.sin(x * 12.9898 + y * 78.233 + z * 37.719) * 43758.5453;
+    const f = 0.92 + (n - Math.floor(n)) * 0.16;
+    pos.setXYZ(i, x * f, y * f, z * f);
+  }
+  LEAF_GEOMETRY.computeVertexNormals();
+}
 const textureLoader = new THREE.TextureLoader();
 const gltfLoader = new GLTFLoader();
 
@@ -69,7 +84,9 @@ export function getBlockDefinition(id) {
 
 export function getBlockGeometry(id) {
   const def = registry.get(id);
-  return def?.model?.geometry ?? BOX_GEOMETRY;
+  if (def?.model?.geometry) return def.model.geometry;
+  if (id === 'leaves') return LEAF_GEOMETRY;
+  return BOX_GEOMETRY;
 }
 
 // ============================================================================
@@ -82,6 +99,15 @@ function hashString(str) {
     h = Math.imul(h ^ str.charCodeAt(i), 16777619);
   }
   return h >>> 0;
+}
+
+/** 世界坐标 → 0~1 的确定性随机数 */
+function hash01(x, y, z) {
+  let h = Math.imul(Math.round(x * 100) + 0x1234, 374761393) ^
+          Math.imul(Math.round(y * 100) + 0x2345, 668265263) ^
+          Math.imul(Math.round(z * 100) + 0x3456, 1442695041);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
 function mulberry32(seed) {
@@ -189,6 +215,9 @@ function applyDefinitionToMaterial(id, material) {
     material.depthWrite = true;
     if (material.roughness !== undefined) material.roughness = 0.95;
     if (material.metalness !== undefined) material.metalness = 0;
+  }
+  if (material.flatShading !== undefined) {
+    material.flatShading = id === 'leaves';
   }
   material.needsUpdate = true;
 }
@@ -397,6 +426,8 @@ export async function importBlockConfig(config) {
  * @param {number} [options.scale] 网格坐标的方块世界尺寸
  * @param {'tree'|'terrain'|'export'} [options.usage]
  * @param {number} [options.colorVariation] 每个方块的亮度随机扰动幅度（0~1）
+ * @param {boolean} [options.randomRotation] 每个实例随机旋转（用于叶团）
+ * @param {number} [options.sizeVariation] 每个实例的尺寸随机扰动幅度（0~1）
  */
 export function createInstancedLayer(id, blocks, {
   scale = 1,
@@ -404,6 +435,8 @@ export function createInstancedLayer(id, blocks, {
   castShadow = true,
   receiveShadow = true,
   colorVariation = 0,
+  randomRotation = false,
+  sizeVariation = 0,
 } = {}) {
   const geometry = getBlockGeometry(id).clone();
   const material = getBlockMaterial(id, usage);
@@ -421,7 +454,21 @@ export function createInstancedLayer(id, blocks, {
     const pz = b.z ?? (b.iz + 0.5) * scale;
     const size = b.size ?? scale;
     dummy.position.set(px, py, pz);
-    dummy.scale.setScalar(size);
+
+    if (randomRotation) {
+      dummy.rotation.set(
+        hash01(px, py, pz) * Math.PI * 2,
+        hash01(pz, px, py) * Math.PI * 2,
+        hash01(py, pz, px) * Math.PI * 2,
+      );
+    } else {
+      dummy.rotation.set(0, 0, 0);
+    }
+
+    const variance = sizeVariation > 0
+      ? 1 + (hash01(py, pz, px) - 0.5) * sizeVariation
+      : 1;
+    dummy.scale.setScalar(size * variance);
     dummy.updateMatrix();
     mesh.setMatrixAt(i, dummy.matrix);
   }
