@@ -26,16 +26,16 @@ export async function createScene(renderer) {
     0.1,
     2000,
   );
-  camera.position.set(95, 65, 95);
+  camera.position.set(26, 14, 26);
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.enablePan = true;
   controls.minPolarAngle = Math.PI * 0.15;
   controls.maxPolarAngle = Math.PI / 2 - 0.02;
-  controls.minDistance = 3;
-  controls.maxDistance = 300;
-  controls.target.set(0, 25, 0);
+  controls.minDistance = 2;
+  controls.maxDistance = 120;
+  controls.target.set(0, 5, 0);
   controls.update();
 
   // 保留 EZ-Tree 的骨架生成与参数系统，但不再渲染平滑网格

@@ -48,7 +48,7 @@ export class VoxelTerrain extends THREE.Group {
 
     this.options = {
       blockSize: 1,
-      radius: 48,
+      radius: 16,
       height: 2.5,
       seed: 7,
       water: true,

@@ -911,6 +911,16 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
   // ----- Voxel & Growth Section -----
   const voxelSection = createSection('体素与生长', 'cube', true);
 
+  const treeScaleSlider = createSlider('树木缩放', voxel.treeScale, 0.04, 0.3, 0.01, (val) => {
+    voxel.treeScale = val;
+    onChange();
+  });
+  voxelSection.add(treeScaleSlider);
+  controls.push({
+    control: treeScaleSlider,
+    update: () => treeScaleSlider.setValue(voxel.treeScale),
+  });
+
   const blockSizeSlider = createSlider('方块尺寸', voxel.blockSize, 0.25, 3, 0.25, (val) => {
     voxel.blockSize = val;
     environment.terrain.options.blockSize = val;
@@ -940,6 +950,16 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
   controls.push({
     control: leafDensitySlider,
     update: () => leafDensitySlider.setValue(voxel.leafDensity),
+  });
+
+  const canopyStartSlider = createSlider('树冠起始高度', voxel.canopyStart, 0, 0.8, 0.05, (val) => {
+    voxel.canopyStart = val;
+    onChange();
+  });
+  voxelSection.add(canopyStartSlider);
+  controls.push({
+    control: canopyStartSlider,
+    update: () => canopyStartSlider.setValue(voxel.canopyStart),
   });
 
   const growthProgressDisplay = createDisplay(
@@ -1303,6 +1323,9 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
   const terrainBlocksDisplay = createDisplay('地形方块', environment.terrain.blockCount, (v) => Math.round(v).toLocaleString());
   infoSection.add(terrainBlocksDisplay);
 
+  const treeHeightDisplay = createDisplay('树高（方块）', voxel.heightBlocks);
+  infoSection.add(treeHeightDisplay);
+
   const versionDisplay = createDisplay('版本', version);
   infoSection.add(versionDisplay);
 
@@ -1320,6 +1343,7 @@ export function setupUI(tree, environment, renderer, scene, camera, orbitControl
     logBlocksDisplay.setValue(voxel.counts.log);
     leafBlocksDisplay.setValue(voxel.counts.leaves);
     terrainBlocksDisplay.setValue(environment.terrain.blockCount);
+    treeHeightDisplay.setValue(voxel.heightBlocks);
     growthProgressDisplay.setValue(voxel.progress);
 
     statsGrown.textContent = Math.round(voxel.grown).toLocaleString();

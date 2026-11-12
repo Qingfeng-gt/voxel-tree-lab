@@ -33,8 +33,10 @@ export class VoxelTree extends THREE.Group {
     this.name = 'VoxelTree';
 
     this.blockSize = 1;
+    this.treeScale = 0.15;
+    this.canopyStart = 0.35;
     this.leafDensity = 1;
-    this.duration = 12; // 完整生长一次的秒数
+    this.duration = 8; // 完整生长一次的秒数
     this.progress = 0;
     this.playing = true;
     this.popWindow = 0.035;
@@ -44,6 +46,7 @@ export class VoxelTree extends THREE.Group {
     /** @type {{ix:number, iy:number, iz:number, type:string, t:number}[]} */
     this.blockList = [];
     this.counts = { total: 0, log: 0, leaves: 0 };
+    this.heightBlocks = 0;
     this.grown = 0;
 
     /** 生长统计回调（每 100ms 触发一次） */
@@ -60,11 +63,18 @@ export class VoxelTree extends THREE.Group {
   /**
    * 根据树的骨架重建体素。
    * @param {import('@dgreenheck/ez-tree').Tree} tree
-   * @param {{blockSize?: number, leafDensity?: number}} options
+   * @param {{blockSize?: number, treeScale?: number, canopyStart?: number, leafDensity?: number}} options
    */
-  rebuild(tree, { blockSize = this.blockSize, leafDensity = this.leafDensity } = {}) {
+  rebuild(tree, {
+    blockSize = this.blockSize,
+    treeScale = this.treeScale,
+    canopyStart = this.canopyStart,
+    leafDensity = this.leafDensity,
+  } = {}) {
     this.disposeLayers();
     this.blockSize = blockSize;
+    this.treeScale = treeScale;
+    this.canopyStart = canopyStart;
     this.leafDensity = leafDensity;
 
     const skeleton = tree.skeleton;
@@ -74,28 +84,55 @@ export class VoxelTree extends THREE.Group {
     }
 
     const bs = blockSize;
+    const scale = treeScale;
+    // 让树干轴线穿过方块中心，细枝才能是干净的 1 格宽
+    const offsetX = bs / 2;
+    const offsetZ = bs / 2;
+
     /** @type {Map<string, {ix:number, iy:number, iz:number, type:string}>} */
     const map = new Map();
 
-    // 树干 / 树枝：逐段把圆柱体素化
+    // 树干 / 树枝：逐段体素化；细枝用 1 格宽的线条
+    const pointA = new THREE.Vector3();
+    const pointB = new THREE.Vector3();
     for (const branch of skeleton.branches) {
       const sections = branch.sections;
       for (let i = 0; i < sections.length - 1; i++) {
-        this.#voxelizeSegment(
-          map,
-          sections[i].origin,
-          sections[i + 1].origin,
-          sections[i].radius,
-          sections[i + 1].radius,
-          bs,
-        );
+        pointA.copy(sections[i].origin).multiplyScalar(scale);
+        pointB.copy(sections[i + 1].origin).multiplyScalar(scale);
+        pointA.x += offsetX;
+        pointA.z += offsetZ;
+        pointB.x += offsetX;
+        pointB.z += offsetZ;
+
+        const radiusA = sections[i].radius * scale;
+        const radiusB = sections[i + 1].radius * scale;
+
+        if (Math.max(radiusA, radiusB) <= bs * 0.75) {
+          this.#voxelizeLine(map, pointA, pointB, bs);
+        } else {
+          this.#voxelizeSegment(map, pointA, pointB, radiusA, radiusB, bs);
+        }
       }
     }
 
     // 树叶：在每片叶子的位置生成一小簇方块
     const rng = new RNG(((tree.options.seed >>> 0) ^ 0x51ed270b) >>> 0);
+    const leafOrigin = new THREE.Vector3();
+
+    // 树冠只保留上部，让树干露出来（更像游戏里的树）
+    let maxLeafY = 0;
     for (const leaf of skeleton.leaves) {
-      this.#addLeafCluster(map, leaf, bs, rng);
+      maxLeafY = Math.max(maxLeafY, leaf.origin.y * scale);
+    }
+    const minLeafY = maxLeafY * canopyStart;
+
+    for (const leaf of skeleton.leaves) {
+      leafOrigin.copy(leaf.origin).multiplyScalar(scale);
+      if (leafOrigin.y < minLeafY) continue;
+      leafOrigin.x += offsetX;
+      leafOrigin.z += offsetZ;
+      this.#addLeafCluster(map, leafOrigin, leaf.orientation, leaf.size * scale, bs, rng);
     }
 
     const blocks = [...map.values()];
@@ -148,6 +185,10 @@ export class VoxelTree extends THREE.Group {
     this.counts.total = blocks.length;
     this.counts.log = byType.get('log')?.length ?? 0;
     this.counts.leaves = byType.get('leaves')?.length ?? 0;
+
+    let maxIy = 0;
+    for (const block of blocks) maxIy = Math.max(maxIy, block.iy);
+    this.heightBlocks = maxIy + 1;
 
     this.progress = 0;
     this.playing = true;
@@ -265,21 +306,42 @@ export class VoxelTree extends THREE.Group {
   }
 
   /**
+   * 细枝使用 1 格宽的线条体素化（类似 Minecraft 的树干/树枝）。
+   */
+  #voxelizeLine(map, originA, originB, bs) {
+    const length = originA.distanceTo(originB);
+    const steps = Math.max(1, Math.ceil(length / (bs * 0.4)));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const x = originA.x + (originB.x - originA.x) * t;
+      const y = originA.y + (originB.y - originA.y) * t;
+      const z = originA.z + (originB.z - originA.z) * t;
+      const ix = Math.floor(x / bs);
+      const iy = Math.floor(y / bs);
+      const iz = Math.floor(z / bs);
+      const key = `${ix},${iy},${iz}`;
+      if (!map.has(key)) {
+        map.set(key, { ix, iy, iz, type: 'log' });
+      }
+    }
+  }
+
+  /**
    * 在叶子位置生成一小簇树叶方块（球状随机分布）。
    */
-  #addLeafCluster(map, leaf, bs, rng) {
+  #addLeafCluster(map, origin, orientation, size, bs, rng) {
     const normal = this._normal
       .set(0, 0, 1)
-      .applyEuler(leaf.orientation);
+      .applyEuler(orientation);
 
-    const radius = Math.max(bs * 0.75, leaf.size * 0.5);
+    const radius = Math.max(bs * 1.2, size * 0.6);
     const count = Math.max(1, Math.min(
-      16,
-      Math.round((leaf.size / bs) * (leaf.size / bs) * 0.9 * this.leafDensity),
+      24,
+      Math.round((radius / bs) * (radius / bs) * 3.5 * this.leafDensity),
     ));
 
     const center = this._vector
-      .copy(leaf.origin)
+      .copy(origin)
       .addScaledVector(normal, radius * 0.35);
 
     for (let i = 0; i < count; i++) {
@@ -393,6 +455,7 @@ export class VoxelTree extends THREE.Group {
     this.blockLayers = [];
     this.blockList = [];
     this.counts = { total: 0, log: 0, leaves: 0 };
+    this.heightBlocks = 0;
     this.grown = 0;
   }
 }
